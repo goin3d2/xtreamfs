@@ -1,7 +1,9 @@
 # xtreamfs
 
-Turns your IPTV provider's VOD catalog into a folder of normal-looking video
-files that Plex can scan and play, with no Emby and no `.strm` files.
+xtreamfs makes the video-on-demand (VOD) catalog from an Xtream Codes IPTV
+provider appear as ordinary movie and TV files, so Plex can scan and play them
+like local media. Plex can't read the `.strm` files most IPTV tools generate;
+xtreamfs fills that gap.
 
 ```
 mount/
@@ -10,9 +12,9 @@ mount/
 ```
 
 Nothing is downloaded. When Plex reads a file, xtreamfs streams that part of it
-from the provider. It reads the catalog through the Xtream API (the same login
-your Emby plugin uses), includes only the categories you choose, and re-checks
-for new and removed titles every 12 hours by default.
+from the provider. It reads the catalog through the Xtream API with your
+provider login, includes only the categories you choose, and re-checks for new
+and removed titles every 12 hours by default.
 
 ## Setup on Unraid
 
