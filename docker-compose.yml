@@ -1,0 +1,19 @@
+services:
+  xtreamfs:
+    build: .
+    image: xtreamfs:local
+    container_name: xtreamfs
+    restart: unless-stopped
+    # Needed on Unraid for the FUSE mount to be shared back to the host.
+    privileged: true
+    env_file: .env
+    environment:
+      TZ: America/New_York
+    volumes:
+      - ./config:/config
+      # The mount must propagate back to the host so Plex can see it.
+      - type: bind
+        source: ./mount
+        target: /mnt/xtream
+        bind:
+          propagation: rshared

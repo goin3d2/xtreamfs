@@ -1,0 +1,13 @@
+# Secrets: provider login and API keys
+.env
+.env.*
+!.env.example
+purge_sonarr.sh
+
+# Runtime data: cached catalog (contains stream URLs), state, and the mount point
+config/
+mount/
+
+# Python
+__pycache__/
+*.pyc

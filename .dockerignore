@@ -1,0 +1,4 @@
+config
+mount
+.env
+*.log
