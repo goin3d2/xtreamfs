@@ -41,8 +41,9 @@ docker compose run --rm xtreamfs --list-categories
 ```
 
 Put the IDs you want into `MOVIE_CATEGORIES` and `SERIES_CATEGORIES` in `.env`
-(for example `MOVIE_CATEGORIES=10,14,22`). Start with a few. You can add more
-later.
+(for example `MOVIE_CATEGORIES=10,14,22`), or use `all` to include every
+category, including ones the provider adds later. Start small if you pick
+individual IDs. You can add more later.
 
 **3. Start it.**
 
@@ -95,12 +96,15 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | Variable | Default | Purpose |
 |---|---|---|
 | `XTREAM_URL` / `_USER` / `_PASS` | (required) | Provider login |
-| `MOVIE_CATEGORIES` | (empty) | Movie category IDs or names, comma-separated |
-| `SERIES_CATEGORIES` | (empty) | Series category IDs or names, comma-separated |
+| `MOVIE_CATEGORIES` | (empty) | Movie category IDs or names, comma-separated, or `all` |
+| `SERIES_CATEGORIES` | (empty) | Series category IDs or names, comma-separated, or `all` |
+| `MOVIE_EXCLUDE` | (empty) | Movie categories to leave out of `all`, by ID or name |
+| `SERIES_EXCLUDE` | (empty) | Series categories to leave out of `all`, by ID or name |
 | `MOVIE_FOLDERS` | (empty) | Movie categories that get their own folder, e.g. `874=4K Movies` |
 | `SERIES_FOLDERS` | (empty) | Series categories that get their own folder, e.g. `843=Anime` |
 | `SERIES_OVERRIDES` | (empty) | Shows sent to a folder by TMDB ID, e.g. `31910,46260=Anime` |
 | `MOVIE_OVERRIDES` | (empty) | Movies sent to a folder by TMDB ID |
+| `SHRINK_GUARD_PERCENT` | `25` | Keep the previous catalog if a refresh would remove more than this share of movies or shows (0 turns it off) |
 | `MAX_STREAMS` | `1` | Most connections to the provider at once |
 | `REFRESH_HOURS` | `12` | How often to re-read the catalog |
 | `STRIP_PREFIX` | `1` | Remove tags like `EN - ` and `\|EN\|` from titles |
@@ -111,6 +115,27 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `UNAVAILABLE_RETRY_HOURS` | `24` | How long to hide a title the provider refuses (403/404) before checking it again |
 | `CACHE_MB` | `256` | Memory for caching the start and end of recently read files (0 turns it off) |
 | `CACHE_EDGE_MB` | `8` | How much of each file's start and end counts as cacheable |
+
+## When the provider reorganizes its categories
+
+Providers sometimes replace their categories, for example swapping
+streaming-service categories for genre ones while keeping the same titles.
+Three things help:
+
+- **`MOVIE_CATEGORIES=all` / `SERIES_CATEGORIES=all`** include every category,
+  so new and renumbered ones are picked up automatically. Use `MOVIE_EXCLUDE` /
+  `SERIES_EXCLUDE` (IDs or names) for anything you don't want. Titles are
+  matched by their stream ID, so a title that only moved to another category
+  keeps its folder and Plex sees no change.
+- **The log reports category changes** at each refresh, e.g.
+  `Provider removed movie categories: 798 Netflix` and
+  `Provider added movie categories: 879 Action`.
+- **The shrink guard.** If a refresh would remove more than
+  `SHRINK_GUARD_PERCENT` (25%) of your movies or of your shows, and you
+  haven't changed your category settings, xtreamfs keeps the previous catalog
+  and logs an error explaining what would have gone. If the removal is
+  genuine, accept it with `docker exec xtreamfs touch /config/accept-shrink`;
+  the next refresh starts right away and applies it.
 
 ## Separate folders for some categories
 
@@ -123,7 +148,9 @@ MOVIE_FOLDERS=874=4K Movies,806=Anime Movies
 ```
 
 That produces `/xtream/Anime`, `/xtream/4K Movies` and so on, next to `Movies`
-and `TV`. Mapped categories are included automatically, so they don't also
+and `TV`. You can use the category's name instead of its ID
+(`SERIES_FOLDERS=Crunchyroll=Anime`), which keeps working if the provider
+renumbers its categories. Mapped categories are included automatically, so they don't also
 need to be in `MOVIE_CATEGORIES` / `SERIES_CATEGORIES`. When a title is in a
 mapped category and in a regular one, it goes in the mapped folder only. Use a
 different folder name for each mapping, and don't reuse `Movies` or `TV`.

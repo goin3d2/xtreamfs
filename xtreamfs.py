@@ -55,8 +55,12 @@ class Config:
         self.password = env("XTREAM_PASS", required=True)
         self.mount = env("MOUNT_POINT", "/mnt/xtream")
         self.cache_dir = env("CACHE_DIR", "/config")
+        # Category IDs or names, or "all" for every category the provider has
+        # (including ones it adds later). *_EXCLUDE removes categories from "all".
         self.movie_cats = self._list(env("MOVIE_CATEGORIES", ""))
         self.series_cats = self._list(env("SERIES_CATEGORIES", ""))
+        self.movie_exclude = self._list(env("MOVIE_EXCLUDE", ""))
+        self.series_exclude = self._list(env("SERIES_EXCLUDE", ""))
         # Categories that get their own top-level folder, e.g. "843=Anime".
         self.movie_folders = self._map(env("MOVIE_FOLDERS", ""))
         self.series_folders = self._map(env("SERIES_FOLDERS", ""))
@@ -71,6 +75,10 @@ class Config:
             if cid not in self.series_cats:
                 self.series_cats.append(cid)
         self.refresh_hours = float(env("REFRESH_HOURS", "12"))
+        # Refuse a refresh that would remove more than this share of movies or
+        # of shows (0 turns the check off).
+        self.shrink_guard = float(env("SHRINK_GUARD_PERCENT", "25"))
+        self.shrink_guard_min = int(env("SHRINK_GUARD_MIN", "50"))  # ignore tiny libraries
         self.max_streams = max(1, int(env("MAX_STREAMS", "1")))
         self.user_agent = env("USER_AGENT", "VLC/3.0.20 LibVLC/3.0.20")
         self.strip_prefix = env("STRIP_PREFIX", "1") == "1"
@@ -141,20 +149,62 @@ class Xtream:
         return f"{c.url}/series/{c.user}/{c.password}/{eid}.{ext}"
 
 
-def resolve_categories(wanted, available):
-    """Match wanted entries (IDs or names, case-insensitive) to category IDs."""
+def is_all(wanted):
+    return any(w.strip().lower() == "all" for w in wanted)
+
+
+def resolve_categories(wanted, available, exclude=()):
+    """Match wanted entries (IDs or names, case-insensitive, or "all") to
+    category IDs, minus any excluded ones."""
     if not wanted:
         return []
     by_id = {str(c["category_id"]): c for c in available}
     by_name = {str(c.get("category_name", "")).strip().lower(): c for c in available}
     out = []
+    if is_all(wanted):
+        out = list(by_id)
     for w in wanted:
+        if w.strip().lower() == "all":
+            continue
         c = by_id.get(w) or by_name.get(w.lower())
         if c:
-            out.append(str(c["category_id"]))
+            if str(c["category_id"]) not in out:
+                out.append(str(c["category_id"]))
         else:
             log.warning("Category %r not found at provider; skipping", w)
-    return out
+    drop = set()
+    for x in exclude:
+        c = by_id.get(x) or by_name.get(x.lower())
+        if c:
+            drop.add(str(c["category_id"]))
+    return [cid for cid in out if cid not in drop]
+
+
+def folder_for(mapping, cid, name):
+    """A category's own folder, looked up by ID or by name (case-insensitive)."""
+    if not mapping:
+        return None
+    if cid in mapping:
+        return mapping[cid]
+    lname = str(name or "").strip().lower()
+    for k, v in mapping.items():
+        if k.strip().lower() == lname:
+            return v
+    return None
+
+
+def report_category_changes(kind, old, new, selected_all):
+    """Log categories the provider added or removed since the last refresh."""
+    if old is None:
+        return
+    added = [f"{i} {new[i]}" for i in new if i not in old]
+    removed = [f"{i} {old[i]}" for i in old if i not in new]
+    if added:
+        log.info("Provider added %s categories: %s%s", kind, ", ".join(added),
+                 "" if selected_all else
+                 f" (not included; add them or set {kind.upper()}_CATEGORIES=all)")
+    if removed:
+        log.warning("Provider removed %s categories: %s", kind, ", ".join(removed))
 
 
 # --------------------------------------------------------------------------
@@ -422,6 +472,7 @@ def settle_dir_times(tree, old_dirs, now):
 def catalog_key(cfg: Config):
     """The category selection a catalog was built from."""
     return {"movies": cfg.movie_cats, "series": cfg.series_cats,
+            "movie_exclude": cfg.movie_exclude, "series_exclude": cfg.series_exclude,
             "movie_folders": cfg.movie_folders,
             "series_folders": cfg.series_folders}
 
@@ -429,15 +480,20 @@ def catalog_key(cfg: Config):
 def fetch_catalog(cfg: Config, xt: Xtream, old_catalog=None):
     """Pull the selected categories from the provider."""
     catalog = {"movies": [], "series": [], "fetched": int(time.time()),
-               "cats": catalog_key(cfg)}
+               "cats": catalog_key(cfg), "categories": {}}
+    old_cats = (old_catalog or {}).get("categories", {})
 
     if cfg.movie_cats:
-        cats = resolve_categories(cfg.movie_cats, xt.api("get_vod_categories"))
+        available = xt.api("get_vod_categories") or []
+        names = {str(c["category_id"]): c.get("category_name", "") for c in available}
+        catalog["categories"]["movie"] = names
+        report_category_changes("movie", old_cats.get("movie"), names, is_all(cfg.movie_cats))
+        cats = resolve_categories(cfg.movie_cats, available, cfg.movie_exclude)
         movies = {}
         for cid in cats:
             items = xt.api("get_vod_streams", category_id=cid) or []
-            log.info("Movies category %s: %d titles", cid, len(items))
-            folder = cfg.movie_folders.get(cid)
+            log.info("Movies category %s (%s): %d titles", cid, names.get(cid, ""), len(items))
+            folder = folder_for(cfg.movie_folders, cid, names.get(cid))
             for m in items:
                 sid = m.get("stream_id")
                 if sid not in movies:
@@ -448,11 +504,11 @@ def fetch_catalog(cfg: Config, xt: Xtream, old_catalog=None):
         catalog["movies"] = list(movies.values())
 
     if cfg.series_cats:
-        catalog["series"] = fetch_series(cfg, xt, old_catalog)
+        catalog["series"] = fetch_series(cfg, xt, old_catalog, catalog["categories"])
     return catalog
 
 
-def fetch_series(cfg: Config, xt: Xtream, old_catalog=None):
+def fetch_series(cfg: Config, xt: Xtream, old_catalog=None, cat_record=None):
     """Fetch the selected series categories and each show's episode list.
 
     Episode lists are the slow part (one API call per show), so they are
@@ -481,12 +537,18 @@ def fetch_series(cfg: Config, xt: Xtream, old_catalog=None):
 
     # Gather show lists first (fast), dropping shows listed in several categories.
     shows, seen = [], set()
-    cats = resolve_categories(cfg.series_cats, xt.api("get_series_categories"))
+    available = xt.api("get_series_categories") or []
+    names = {str(c["category_id"]): c.get("category_name", "") for c in available}
+    if cat_record is not None:
+        cat_record["series"] = names
+    report_category_changes("series", ((old_catalog or {}).get("categories") or {}).get("series"),
+                            names, is_all(cfg.series_cats))
+    cats = resolve_categories(cfg.series_cats, available, cfg.series_exclude)
     by_id = {}
     for cid in cats:
         items = xt.api("get_series", category_id=cid) or []
-        log.info("Series category %s: %d shows", cid, len(items))
-        folder = cfg.series_folders.get(cid)
+        log.info("Series category %s (%s): %d shows", cid, names.get(cid, ""), len(items))
+        folder = folder_for(cfg.series_folders, cid, names.get(cid))
         for s in items:
             sid = str(s.get("series_id"))
             if sid not in seen:
@@ -862,6 +924,7 @@ class XtreamFS(fuse.Operations):
         self.catalog_path = os.path.join(cfg.cache_dir, "catalog.json")
         self.sizes_path = os.path.join(cfg.cache_dir, "sizes.json")
         self.trigger_path = os.path.join(cfg.cache_dir, "refresh")
+        self.accept_path = os.path.join(cfg.cache_dir, "accept-shrink")
         self.sizes = self._load_json(self.sizes_path, {})
         self.size_fail = {}
         self.unavail_path = os.path.join(cfg.cache_dir, "unavailable.json")
@@ -919,6 +982,9 @@ class XtreamFS(fuse.Operations):
         trigger file (docker exec xtreamfs touch /config/refresh)."""
         end = time.time() + seconds
         while time.time() < end:
+            if os.path.exists(self.accept_path):
+                log.info("accept-shrink found; refreshing now")
+                return
             if os.path.exists(self.trigger_path):
                 try:
                     os.remove(self.trigger_path)
@@ -927,6 +993,23 @@ class XtreamFS(fuse.Operations):
                 log.info("Manual refresh requested")
                 return
             time.sleep(min(10, max(0, end - time.time())))
+
+    def _shrink_problem(self, catalog):
+        """Describe a suspicious drop in movies or shows, or return None.
+
+        Only applies when the category settings are unchanged; a drop after you
+        change categories yourself is expected."""
+        old = self.catalog
+        g = self.cfg.shrink_guard
+        if g <= 0 or not old or old.get("cats") != catalog.get("cats"):
+            return None
+        issues = []
+        for kind, key in (("movies", "movies"), ("shows", "series")):
+            before, after = len(old.get(key) or []), len(catalog.get(key) or [])
+            if before >= self.cfg.shrink_guard_min and after < before * (1 - g / 100):
+                issues.append(f"{kind} would drop from {before} to {after} "
+                              f"({100 - after * 100 // before}% fewer)")
+        return "; ".join(issues) or None
 
     def _refresh_loop(self):
         if not self.catalog:
@@ -942,6 +1025,21 @@ class XtreamFS(fuse.Operations):
             try:
                 log.info("Refreshing catalog from provider")
                 catalog = fetch_catalog(self.cfg, self.xt, self.catalog)
+                problem = self._shrink_problem(catalog)
+                if problem:
+                    if os.path.exists(self.accept_path):
+                        log.warning("Accepting the smaller catalog as requested: %s", problem)
+                    else:
+                        log.error("Keeping the previous catalog: %s. If the provider really "
+                                  "removed these, accept it with: docker exec xtreamfs touch "
+                                  "/config/accept-shrink", problem)
+                        delay = self.cfg.refresh_hours * 3600
+                        continue
+                if os.path.exists(self.accept_path):
+                    try:
+                        os.remove(self.accept_path)
+                    except OSError:
+                        pass
                 tree, state = build_tree(catalog, self.xt,
                                          self.cfg.strip_prefix, self.state,
                                          self.cfg.overrides)
