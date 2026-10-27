@@ -78,6 +78,8 @@ class Config:
         # Refuse a refresh that would remove more than this share of movies or
         # of shows (0 turns the check off).
         self.shrink_guard = float(env("SHRINK_GUARD_PERCENT", "25"))
+        # Put movies in one subfolder per provider category: Movies/<Category>/<Title>.
+        self.movie_layout = "category" if env("MOVIE_CATEGORY_FOLDERS", "0") == "1" else "flat"
         self.shrink_guard_min = int(env("SHRINK_GUARD_MIN", "50"))  # ignore tiny libraries
         self.max_streams = max(1, int(env("MAX_STREAMS", "1")))
         self.user_agent = env("USER_AGENT", "VLC/3.0.20 LibVLC/3.0.20")
@@ -332,7 +334,8 @@ def to_ts(v, default):
 NAMING_VERSION = 2  # bump when the naming rules change
 
 
-def build_tree(catalog, xt: Xtream, strip_prefix=True, state=None, overrides=None):
+def build_tree(catalog, xt: Xtream, strip_prefix=True, state=None, overrides=None,
+               movie_layout="flat"):
     """Build the folder tree from a catalog.
 
     `state` remembers, from earlier builds, the path each title was given and
@@ -346,6 +349,10 @@ def build_tree(catalog, xt: Xtream, strip_prefix=True, state=None, overrides=Non
     series_over = overrides.get("series", {})
     # When the naming rules change, rename everything once to the new scheme.
     old_paths = state.get("paths", {}) if state.get("naming") == NAMING_VERSION else {}
+    # Switching between flat and per-category movie folders re-places every movie once.
+    if state.get("movie_layout", "flat") != movie_layout:
+        old_paths = {k: v for k, v in old_paths.items() if not k.startswith("m")}
+    movie_cat_names = (catalog.get("categories") or {}).get("movie", {})
     old_seen = state.get("first_seen", {})
     paths, first_seen = {}, {}
     now = int(time.time())
@@ -386,7 +393,13 @@ def build_tree(catalog, xt: Xtream, strip_prefix=True, state=None, overrides=Non
             title, year = split_year(clean_title(m.get("name"), strip_prefix),
                                      m.get("year") or m.get("releaseDate"))
             base = safe(f"{title} ({year})" if year else title)
-            folder = f"/{root}/{safe(base + tmdb_tag(tmdb_of(m)))}"
+            parent = f"/{root}"
+            if movie_layout == "category" and root == "Movies":
+                # Movies/<category name>/<title>: each title has one provider category.
+                cat = (movie_cat_names.get(str(m.get("category_id") or ""))
+                       or movie_cat_names.get(str(m.get("_cat") or "")) or "Other")
+                parent = f"/{root}/{safe(cat)}"
+            folder = f"{parent}/{safe(base + tmdb_tag(tmdb_of(m)))}"
             label = "4K" if QUALITY_RE.match(str(m.get("name") or "")) else None
             path = f"{folder}/{base}.{ext}"
             if label and path in tree.files:
@@ -438,7 +451,7 @@ def build_tree(catalog, xt: Xtream, strip_prefix=True, state=None, overrides=Non
 
     tree.finish()
     dirs = settle_dir_times(tree, state.get("dirs"), now)
-    return tree, {"naming": NAMING_VERSION, "paths": paths,
+    return tree, {"naming": NAMING_VERSION, "movie_layout": movie_layout, "paths": paths,
                   "first_seen": first_seen, "dirs": dirs}
 
 
@@ -498,6 +511,7 @@ def fetch_catalog(cfg: Config, xt: Xtream, old_catalog=None):
                 sid = m.get("stream_id")
                 if sid not in movies:
                     m["_folder"] = folder or "Movies"
+                    m["_cat"] = cid  # the category list it was found in
                     movies[sid] = m
                 elif folder:  # a category with its own folder wins
                     movies[sid]["_folder"] = folder
@@ -939,7 +953,7 @@ class XtreamFS(fuse.Operations):
         if catalog:
             self.tree, self.state = build_tree(catalog, self.xt,
                                                cfg.strip_prefix, self.state,
-                                               cfg.overrides)
+                                               cfg.overrides, cfg.movie_layout)
             log.info("Loaded cached catalog: %d files", len(self.tree.files))
         self.catalog = catalog
         threading.Thread(target=self._refresh_loop, daemon=True).start()
@@ -1042,7 +1056,7 @@ class XtreamFS(fuse.Operations):
                         pass
                 tree, state = build_tree(catalog, self.xt,
                                          self.cfg.strip_prefix, self.state,
-                                         self.cfg.overrides)
+                                         self.cfg.overrides, self.cfg.movie_layout)
                 with self.tree_lock:
                     self.tree = tree
                 self.catalog, self.state = catalog, state

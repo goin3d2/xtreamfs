@@ -104,6 +104,7 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `SERIES_FOLDERS` | (empty) | Series categories that get their own folder, e.g. `843=Anime` |
 | `SERIES_OVERRIDES` | (empty) | Shows sent to a folder by TMDB ID, e.g. `31910,46260=Anime` |
 | `MOVIE_OVERRIDES` | (empty) | Movies sent to a folder by TMDB ID |
+| `MOVIE_CATEGORY_FOLDERS` | `0` | `1` puts each movie in a subfolder for its provider category: `Movies/<Category>/<Title (Year)>` |
 | `SHRINK_GUARD_PERCENT` | `25` | Keep the previous catalog if a refresh would remove more than this share of movies or shows (0 turns it off) |
 | `MAX_STREAMS` | `1` | Most connections to the provider at once |
 | `REFRESH_HOURS` | `12` | How often to re-read the catalog |
@@ -115,6 +116,23 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `UNAVAILABLE_RETRY_HOURS` | `24` | How long to hide a title the provider refuses (403/404) before checking it again |
 | `CACHE_MB` | `256` | Memory for caching the start and end of recently read files (0 turns it off) |
 | `CACHE_EDGE_MB` | `8` | How much of each file's start and end counts as cacheable |
+
+## Category subfolders for movies
+
+With a large catalog, `MOVIE_CATEGORY_FOLDERS=1` splits Movies into one
+subfolder per provider category:
+
+```
+Movies/Comedy/Airplane! (1980) {tmdb-813}/Airplane! (1980).mkv
+Movies/4K Movies/Dune (2021) {tmdb-438631}/Dune (2021).mkv
+```
+
+Each title belongs to one provider category, so it appears in exactly one
+subfolder. A title keeps its folder if the provider later moves it to another
+category. Turning the setting on or off moves every movie once, so Plex
+treats them as new and analyses them again; plan for a full Movies rescan.
+Plex combines a 4K copy and a regular copy of the same film into one entry
+even though they now sit in different subfolders.
 
 ## When the provider reorganizes its categories
 
