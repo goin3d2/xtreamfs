@@ -7,6 +7,8 @@ purge_sonarr.sh
 # Runtime data: cached catalog (contains stream URLs), state, and the mount point
 config/
 mount/
+# .strm copy of the library (each file contains the provider login)
+strm/
 
 # Python
 __pycache__/
