@@ -11,6 +11,8 @@ services:
       TZ: America/New_York
     volumes:
       - ./config:/config
+      # .strm copy of the library for Emby/Jellyfin (used when STRM_DIR=/strm).
+      - ./strm:/strm
       # The mount must propagate back to the host so Plex can see it.
       - type: bind
         source: ./mount

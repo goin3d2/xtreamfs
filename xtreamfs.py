@@ -80,6 +80,8 @@ class Config:
         self.shrink_guard = float(env("SHRINK_GUARD_PERCENT", "25"))
         # Put movies in one subfolder per provider category: Movies/<Category>/<Title>.
         self.movie_layout = "category" if env("MOVIE_CATEGORY_FOLDERS", "0") == "1" else "flat"
+        # Optional folder that gets a .strm copy of the whole tree (for Emby/Jellyfin).
+        self.strm_dir = env("STRM_DIR", "").rstrip("/")
         self.shrink_guard_min = int(env("SHRINK_GUARD_MIN", "50"))  # ignore tiny libraries
         self.max_streams = max(1, int(env("MAX_STREAMS", "1")))
         self.user_agent = env("USER_AGENT", "VLC/3.0.20 LibVLC/3.0.20")
@@ -915,6 +917,85 @@ class Stream:
 # --------------------------------------------------------------------------
 
 
+class StrmWriter:
+    """Keeps a folder of .strm files in step with the tree.
+
+    Each video file in the mount gets a matching .strm file holding its
+    provider URL, in the same folder layout. Only new or changed files are
+    written and removed titles are deleted, so a refresh with few changes
+    touches few files. File dates match the mount's, so media servers don't
+    see unchanged titles as modified.
+    """
+
+    def __init__(self, root, cache_dir):
+        self.root = root
+        self.manifest_path = os.path.join(cache_dir, "strm_manifest.json")
+        self.lock = threading.Lock()
+
+    def _load(self):
+        try:
+            with open(self.manifest_path) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
+    def _save(self, manifest):
+        tmp = self.manifest_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(manifest, f)
+        os.replace(tmp, self.manifest_path)
+
+    def sync(self, tree, skip=lambda entry: False):
+        if not self.lock.acquire(blocking=False):
+            log.info("STRM: a sync is already running; skipping this one")
+            return
+        try:
+            t0 = time.time()
+            old = self._load()
+            want = {}
+            for path, e in tree.files.items():
+                if skip(e):
+                    continue
+                rel = os.path.splitext(path.lstrip("/"))[0] + ".strm"
+                want[rel] = (e.url, e.mtime)
+            written = removed = 0
+            for rel, (url, mtime) in want.items():
+                full = os.path.join(self.root, rel)
+                if old.get(rel) == url and os.path.exists(full):
+                    continue
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                tmp = full + ".tmp"
+                with open(tmp, "w") as f:
+                    f.write(url + "\n")
+                os.utime(tmp, (mtime, mtime))
+                os.replace(tmp, full)
+                written += 1
+            for rel in old:
+                if rel not in want:
+                    try:
+                        os.remove(os.path.join(self.root, rel))
+                        removed += 1
+                    except FileNotFoundError:
+                        pass
+                    d = os.path.dirname(os.path.join(self.root, rel))
+                    while d.startswith(self.root) and d != self.root:
+                        try:
+                            os.rmdir(d)  # only succeeds once the folder is empty
+                        except OSError:
+                            break
+                        d = os.path.dirname(d)
+            self._save({rel: url for rel, (url, _) in want.items()})
+            log.info("STRM: %d files in %s (%d written, %d removed) in %.0fs",
+                     len(want), self.root, written, removed, time.time() - t0)
+        except Exception as e:
+            log.error("STRM sync failed: %s", e)
+        finally:
+            self.lock.release()
+
+    def sync_in_background(self, tree, skip):
+        threading.Thread(target=self.sync, args=(tree, skip), daemon=True).start()
+
+
 class XtreamFS(fuse.Operations):
     use_ns = True
 
@@ -947,6 +1028,7 @@ class XtreamFS(fuse.Operations):
         self.size_lock = threading.Lock()
         self.sizes_dirty = False
 
+        self.strm = StrmWriter(cfg.strm_dir, cfg.cache_dir) if cfg.strm_dir else None
         self.state_path = os.path.join(cfg.cache_dir, "state.json")
         self.state = self._load_json(self.state_path, {})
         catalog = self._load_json(self.catalog_path, None)
@@ -955,6 +1037,8 @@ class XtreamFS(fuse.Operations):
                                                cfg.strip_prefix, self.state,
                                                cfg.overrides, cfg.movie_layout)
             log.info("Loaded cached catalog: %d files", len(self.tree.files))
+            if self.strm:
+                self.strm.sync_in_background(self.tree, self.is_unavailable)
         self.catalog = catalog
         threading.Thread(target=self._refresh_loop, daemon=True).start()
         threading.Thread(target=self._save_sizes_loop, daemon=True).start()
@@ -1063,6 +1147,8 @@ class XtreamFS(fuse.Operations):
                 self._save_json(self.catalog_path, catalog)
                 self._save_json(self.state_path, state)
                 log.info("Catalog ready: %d files", len(tree.files))
+                if self.strm:
+                    self.strm.sync_in_background(tree, self.is_unavailable)
                 delay = self.cfg.refresh_hours * 3600
             except Exception as e:
                 log.error("Catalog refresh failed: %s (retrying in 15 min)", e)

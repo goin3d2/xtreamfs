@@ -105,6 +105,7 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `SERIES_OVERRIDES` | (empty) | Shows sent to a folder by TMDB ID, e.g. `31910,46260=Anime` |
 | `MOVIE_OVERRIDES` | (empty) | Movies sent to a folder by TMDB ID |
 | `MOVIE_CATEGORY_FOLDERS` | `0` | `1` puts each movie in a subfolder for its provider category: `Movies/<Category>/<Title (Year)>` |
+| `STRM_DIR` | (empty) | Folder that gets a `.strm` copy of the whole library, e.g. `/strm` |
 | `SHRINK_GUARD_PERCENT` | `25` | Keep the previous catalog if a refresh would remove more than this share of movies or shows (0 turns it off) |
 | `MAX_STREAMS` | `1` | Most connections to the provider at once |
 | `REFRESH_HOURS` | `12` | How often to re-read the catalog |
@@ -133,6 +134,22 @@ category. Turning the setting on or off moves every movie once, so Plex
 treats them as new and analyses them again; plan for a full Movies rescan.
 Plex combines a 4K copy and a regular copy of the same film into one entry
 even though they now sit in different subfolders.
+
+## A .strm copy for Emby or Jellyfin
+
+Set `STRM_DIR=/strm` and xtreamfs also writes a `.strm` file for every title
+into the `strm` folder next to `docker-compose.yml`, in the same layout as the
+mount (`strm/Movies/...`, `strm/TV/...`). Each file holds the title's stream
+link. Point Emby or Jellyfin libraries at those folders: they read `.strm`
+files without touching the provider, so scans are fast.
+
+- These are ordinary files on disk, written after each catalog refresh. Only
+  new or changed titles are written and removed ones are deleted, with dates
+  kept stable, so the media server only rescans what changed.
+- Titles the provider refuses are left out.
+- Emby plays from the provider directly, so its streams don't count toward
+  `MAX_STREAMS`. Each file contains the provider link, including your login.
+- Media info (resolution, HDR) appears in Emby after a title is first played.
 
 ## When the provider reorganizes its categories
 
