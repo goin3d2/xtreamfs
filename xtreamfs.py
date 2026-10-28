@@ -84,6 +84,8 @@ class Config:
         self.series_layout = "category" if env("SERIES_CATEGORY_FOLDERS", "0") == "1" else "flat"
         # Optional folder that gets a .strm copy of the whole tree (for Emby/Jellyfin).
         self.strm_dir = env("STRM_DIR", "").rstrip("/")
+        # Also write .nfo metadata files next to the .strm files, from the provider's catalog.
+        self.strm_nfo = env("STRM_NFO", "0") == "1"
         self.shrink_guard_min = int(env("SHRINK_GUARD_MIN", "50"))  # ignore tiny libraries
         self.max_streams = max(1, int(env("MAX_STREAMS", "1")))
         self.user_agent = env("USER_AGENT", "VLC/3.0.20 LibVLC/3.0.20")
@@ -276,12 +278,13 @@ def ext_of(v, default="mkv"):
 
 
 class Entry:
-    __slots__ = ("url", "key", "mtime")
+    __slots__ = ("url", "key", "mtime", "meta")
 
-    def __init__(self, url, key, mtime):
+    def __init__(self, url, key, mtime, meta=None):
         self.url = url
         self.key = key      # stable cache key for size lookups
         self.mtime = mtime
+        self.meta = meta    # catalog records for .nfo files: ("m", movie) or ("e", episode, show)
 
 
 class Tree:
@@ -416,7 +419,7 @@ def build_tree(catalog, xt: Xtream, strip_prefix=True, state=None, overrides=Non
                 path = f"{folder}/{base} - {sid}.{ext}"
         paths[key] = path
         tree.add_file(path, Entry(xt.movie_url(sid, ext), key,
-                                  seen(key, m.get("added"))))
+                                  seen(key, m.get("added")), ("m", m)))
 
     # ---- Series --------------------------------------------------------------
     shows = [s for s in catalog.get("series", []) if (s.get("_info") or {}).get("episodes")]
@@ -464,7 +467,7 @@ def build_tree(catalog, xt: Xtream, strip_prefix=True, state=None, overrides=Non
                     path = path[: -len(ext) - 1] + f" - {eid}.{ext}"
                 tree.add_file(path, Entry(
                     xt.episode_url(eid, ext), key,
-                    seen(key, ep.get("added") or s.get("last_modified"))))
+                    seen(key, ep.get("added") or s.get("last_modified")), ("e", ep, s)))
 
     tree.finish()
     dirs = settle_dir_times(tree, state.get("dirs"), now)
@@ -933,6 +936,113 @@ class Stream:
 # --------------------------------------------------------------------------
 
 
+_XML_BAD = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _x(v):
+    """Text for an XML element: escaped, without characters XML forbids."""
+    return (_XML_BAD.sub("", str(v)).replace("&", "&amp;")
+            .replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _first_url(v):
+    """The first http(s) URL in a field that may be a URL, a list, or a list's text."""
+    if isinstance(v, (list, tuple)):
+        v = v[0] if v else ""
+    m = re.search(r"https?://[^\s'\"\],]+", str(v or ""))
+    return m.group(0) if m else ""
+
+
+def _num(v):
+    try:
+        f = float(v)
+        return f if f > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _nfo(root, fields):
+    """Build an NFO document. `fields` is a list of (tag, value) pairs; empty
+    values are left out, and a value that is already XML is passed through."""
+    lines = ['<?xml version="1.0" encoding="utf-8" standalone="yes"?>', f"<{root}>"]
+    for tag, val in fields:
+        if val in (None, "", [], 0):
+            continue
+        if tag == "_raw":
+            lines.append(f"  {val}")
+        else:
+            lines.append(f"  <{tag}>{_x(val)}</{tag}>")
+    lines.append(f"</{root}>")
+    return "\n".join(lines) + "\n"
+
+
+def _ids(tmdb):
+    if not tmdb:
+        return []
+    return [("_raw", f'<uniqueid type="tmdb" default="true">{_x(tmdb)}</uniqueid>'),
+            ("tmdbid", tmdb)]
+
+
+def _date(v):
+    v = str(v or "")[:10]
+    return v if re.match(r"\d{4}-\d{2}-\d{2}$", v) else ""
+
+
+def movie_nfo(m, strip_prefix):
+    title, year = split_year(clean_title(m.get("name"), strip_prefix),
+                             m.get("year") or m.get("releaseDate"))
+    poster = _first_url(m.get("stream_icon"))
+    return _nfo("movie", [
+        ("title", title), ("year", year), ("rating", _num(m.get("rating"))),
+        ("plot", m.get("plot")), ("genre", m.get("genre")),
+        *_ids(tmdb_of(m)),
+        ("_raw", f'<thumb aspect="poster">{_x(poster)}</thumb>' if poster else ""),
+    ])
+
+
+def show_nfo(s, strip_prefix):
+    title, year = split_year(clean_title(s.get("name"), strip_prefix),
+                             s.get("year") or s.get("releaseDate"))
+    fields = [("title", title), ("year", year), ("plot", s.get("plot")),
+              ("premiered", _date(s.get("releaseDate"))), ("rating", _num(s.get("rating")))]
+    for g in re.split(r"\s*[,/]\s*", str(s.get("genre") or "")):
+        if g:
+            fields.append(("genre", g))
+    fields += _ids(tmdb_of(s))
+    poster, fanart = _first_url(s.get("cover")), _first_url(s.get("backdrop_path"))
+    if poster:
+        fields.append(("_raw", f'<thumb aspect="poster">{_x(poster)}</thumb>'))
+    if fanart:
+        fields.append(("_raw", f"<fanart><thumb>{_x(fanart)}</thumb></fanart>"))
+    for name in str(s.get("cast") or "").split(",")[:20]:
+        if name.strip():
+            fields.append(("_raw", f"<actor><name>{_x(name.strip())}</name></actor>"))
+    if s.get("director"):
+        fields.append(("director", s.get("director")))
+    return _nfo("tvshow", fields)
+
+
+def episode_nfo(ep, season, num):
+    info = ep.get("info") or {}
+    if not isinstance(info, dict):
+        info = {}
+    secs = _num(info.get("duration_secs"))
+    thumb = _first_url(info.get("movie_image"))
+    title = str(ep.get("title") or "")
+    # Providers often title episodes "Show S01E02" (no real title) or
+    # "Show - S01E02 - Real Title"; keep only the real title.
+    m = re.search(r"S\d+\s*E\d+(?:\s*-\s*(.*\S))?\s*$", title, re.I)
+    if m:
+        title = m.group(1) or info.get("name") or ""
+    return _nfo("episodedetails", [
+        ("title", title), ("season", season), ("episode", num),
+        ("plot", info.get("plot")), ("aired", _date(info.get("releaseDate") or info.get("air_date"))),
+        ("rating", _num(info.get("rating"))),
+        ("runtime", int(secs // 60) if secs else None),
+        ("_raw", f"<thumb>{_x(thumb)}</thumb>" if thumb else ""),
+    ])
+
+
 class StrmWriter:
     """Keeps a folder of .strm files in step with the tree.
 
@@ -943,8 +1053,10 @@ class StrmWriter:
     see unchanged titles as modified.
     """
 
-    def __init__(self, root, cache_dir):
+    def __init__(self, root, cache_dir, nfo=False, strip_prefix=True):
         self.root = root
+        self.nfo = nfo
+        self.strip_prefix = strip_prefix
         self.manifest_path = os.path.join(cache_dir, "strm_manifest.json")
         self.lock = threading.Lock()
 
@@ -968,24 +1080,52 @@ class StrmWriter:
         try:
             t0 = time.time()
             old = self._load()
-            want = {}
-            for path, e in tree.files.items():
-                if skip(e):
-                    continue
-                rel = os.path.splitext(path.lstrip("/"))[0] + ".strm"
-                want[rel] = (e.url, e.mtime)
-            written = removed = 0
-            for rel, (url, mtime) in want.items():
+            want = {}       # relative path -> manifest value (URL, or "nfo:<hash>")
+            written = removed = nfos = 0
+
+            def put(rel, text, tag, mtime):
+                """Write `text` to `rel` unless the manifest says it's already there."""
+                nonlocal written
+                want[rel] = tag
                 full = os.path.join(self.root, rel)
-                if old.get(rel) == url and os.path.exists(full):
-                    continue
+                if old.get(rel) == tag and os.path.exists(full):
+                    return
                 os.makedirs(os.path.dirname(full), exist_ok=True)
                 tmp = full + ".tmp"
-                with open(tmp, "w") as f:
-                    f.write(url + "\n")
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.write(text)
                 os.utime(tmp, (mtime, mtime))
                 os.replace(tmp, full)
                 written += 1
+
+            def put_nfo(rel, text, mtime):
+                nonlocal nfos
+                nfos += 1
+                put(rel, text, "nfo:" + hashlib.sha1(text.encode()).hexdigest()[:16], mtime)
+
+            shows_done = set()
+            for path, e in tree.files.items():
+                if skip(e):
+                    continue
+                base = os.path.splitext(path.lstrip("/"))[0]
+                put(base + ".strm", e.url + "\n", e.url, e.mtime)
+                if not self.nfo or not e.meta:
+                    continue
+                try:
+                    if e.meta[0] == "m":
+                        put_nfo(base + ".nfo", movie_nfo(e.meta[1], self.strip_prefix), e.mtime)
+                    else:
+                        ep, show = e.meta[1], e.meta[2]
+                        m = re.search(r"S(\d+)E(\d+)", os.path.basename(base))
+                        season, num = (int(m.group(1)), int(m.group(2))) if m else (None, None)
+                        put_nfo(base + ".nfo", episode_nfo(ep, season, num), e.mtime)
+                        show_dir = os.path.dirname(os.path.dirname(base))  # <show>/Season NN/<file>
+                        if show_dir not in shows_done:
+                            shows_done.add(show_dir)
+                            put_nfo(os.path.join(show_dir, "tvshow.nfo"),
+                                    show_nfo(show, self.strip_prefix), e.mtime)
+                except Exception as err:  # one odd catalog record shouldn't stop the sync
+                    log.debug("NFO for %s skipped: %s", path, err)
             for rel in old:
                 if rel not in want:
                     try:
@@ -1000,9 +1140,9 @@ class StrmWriter:
                         except OSError:
                             break
                         d = os.path.dirname(d)
-            self._save({rel: url for rel, (url, _) in want.items()})
-            log.info("STRM: %d files in %s (%d written, %d removed) in %.0fs",
-                     len(want), self.root, written, removed, time.time() - t0)
+            self._save(want)
+            log.info("STRM: %d files in %s, %d of them .nfo (%d written, %d removed) in %.0fs",
+                     len(want), self.root, nfos, written, removed, time.time() - t0)
         except Exception as e:
             log.error("STRM sync failed: %s", e)
         finally:
@@ -1044,7 +1184,8 @@ class XtreamFS(fuse.Operations):
         self.size_lock = threading.Lock()
         self.sizes_dirty = False
 
-        self.strm = StrmWriter(cfg.strm_dir, cfg.cache_dir) if cfg.strm_dir else None
+        self.strm = (StrmWriter(cfg.strm_dir, cfg.cache_dir, cfg.strm_nfo, cfg.strip_prefix)
+                     if cfg.strm_dir else None)
         self.state_path = os.path.join(cfg.cache_dir, "state.json")
         self.state = self._load_json(self.state_path, {})
         catalog = self._load_json(self.catalog_path, None)

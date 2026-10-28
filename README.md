@@ -107,6 +107,7 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `MOVIE_CATEGORY_FOLDERS` | `0` | `1` puts each movie in a subfolder for its provider category: `Movies/<Category>/<Title (Year)>` |
 | `SERIES_CATEGORY_FOLDERS` | `0` | `1` does the same for shows: `TV/<Category>/<Show (Year)>` |
 | `STRM_DIR` | (empty) | Folder that gets a `.strm` copy of the whole library, e.g. `/strm` |
+| `STRM_NFO` | `0` | `1` also writes `.nfo` metadata files next to the `.strm` files |
 | `SHRINK_GUARD_PERCENT` | `25` | Keep the previous catalog if a refresh would remove more than this share of movies or shows (0 turns it off) |
 | `MAX_STREAMS` | `1` | Most connections to the provider at once |
 | `REFRESH_HOURS` | `12` | How often to re-read the catalog |
@@ -162,6 +163,24 @@ files without touching the provider, so scans are fast.
 - Emby plays from the provider directly, so its streams don't count toward
   `MAX_STREAMS`. Each file contains the provider link, including your login.
 - Media info (resolution, HDR) appears in Emby after a title is first played.
+
+## Metadata files for faster Emby/Jellyfin scans
+
+With `STRM_DIR` set, `STRM_NFO=1` also writes an `.nfo` file next to each
+`.strm` file, plus a `tvshow.nfo` in each show folder, built from the
+provider's catalog: titles, plots, genres, cast, ratings, air dates, runtimes,
+TMDB IDs and artwork links. Emby and Jellyfin read these during a scan, so new
+titles get their details without a lookup per title.
+
+To get the speed-up, turn off the internet metadata downloaders (TheMovieDb,
+TheTVDB) for the libraries that point at the `strm` folder; otherwise the
+server still looks every title up online. You can still refresh any single
+title from TMDB later. Leave *Save metadata as NFO* off in those libraries, so
+the server doesn't overwrite these files.
+
+How complete the details are depends on the provider. For shows and episodes
+it's usually good. For movies the catalog only has the title, year, rating,
+TMDB ID and poster, so movies are worth leaving on TMDB.
 
 ## When the provider reorganizes its categories
 
