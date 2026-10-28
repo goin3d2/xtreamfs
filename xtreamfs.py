@@ -86,6 +86,8 @@ class Config:
         self.strm_dir = env("STRM_DIR", "").rstrip("/")
         # Also write .nfo metadata files next to the .strm files, from the provider's catalog.
         self.strm_nfo = env("STRM_NFO", "0") == "1"
+        # Mark those .nfo files locked, so the media server leaves the titles alone.
+        self.strm_nfo_lock = env("STRM_NFO_LOCK", "0") == "1"
         self.shrink_guard_min = int(env("SHRINK_GUARD_MIN", "50"))  # ignore tiny libraries
         self.max_streams = max(1, int(env("MAX_STREAMS", "1")))
         self.user_agent = env("USER_AGENT", "VLC/3.0.20 LibVLC/3.0.20")
@@ -1053,9 +1055,10 @@ class StrmWriter:
     see unchanged titles as modified.
     """
 
-    def __init__(self, root, cache_dir, nfo=False, strip_prefix=True):
+    def __init__(self, root, cache_dir, nfo=False, strip_prefix=True, lock=False):
         self.root = root
         self.nfo = nfo
+        self.lock_nfo = lock
         self.strip_prefix = strip_prefix
         self.manifest_path = os.path.join(cache_dir, "strm_manifest.json")
         self.lock = threading.Lock()
@@ -1101,6 +1104,10 @@ class StrmWriter:
             def put_nfo(rel, text, mtime):
                 nonlocal nfos
                 nfos += 1
+                if self.lock_nfo:
+                    # <lockdata> tells Emby/Jellyfin not to replace these details online.
+                    end = text.rindex("</")
+                    text = text[:end] + "  <lockdata>true</lockdata>\n" + text[end:]
                 put(rel, text, "nfo:" + hashlib.sha1(text.encode()).hexdigest()[:16], mtime)
 
             shows_done = set()
@@ -1184,8 +1191,8 @@ class XtreamFS(fuse.Operations):
         self.size_lock = threading.Lock()
         self.sizes_dirty = False
 
-        self.strm = (StrmWriter(cfg.strm_dir, cfg.cache_dir, cfg.strm_nfo, cfg.strip_prefix)
-                     if cfg.strm_dir else None)
+        self.strm = (StrmWriter(cfg.strm_dir, cfg.cache_dir, cfg.strm_nfo, cfg.strip_prefix,
+                                cfg.strm_nfo_lock) if cfg.strm_dir else None)
         self.state_path = os.path.join(cfg.cache_dir, "state.json")
         self.state = self._load_json(self.state_path, {})
         catalog = self._load_json(self.catalog_path, None)

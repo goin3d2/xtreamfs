@@ -108,6 +108,7 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `SERIES_CATEGORY_FOLDERS` | `0` | `1` does the same for shows: `TV/<Category>/<Show (Year)>` |
 | `STRM_DIR` | (empty) | Folder that gets a `.strm` copy of the whole library, e.g. `/strm` |
 | `STRM_NFO` | `0` | `1` also writes `.nfo` metadata files next to the `.strm` files |
+| `STRM_NFO_LOCK` | `0` | `1` marks those `.nfo` files locked, so the server skips online lookups for them |
 | `SHRINK_GUARD_PERCENT` | `25` | Keep the previous catalog if a refresh would remove more than this share of movies or shows (0 turns it off) |
 | `MAX_STREAMS` | `1` | Most connections to the provider at once |
 | `REFRESH_HOURS` | `12` | How often to re-read the catalog |
@@ -177,6 +178,12 @@ TheTVDB) for the libraries that point at the `strm` folder; otherwise the
 server still looks every title up online. You can still refresh any single
 title from TMDB later. Leave *Save metadata as NFO* off in those libraries, so
 the server doesn't overwrite these files.
+
+If the strm folders share a library with your own media, turning the
+downloaders off isn't an option. Set `STRM_NFO_LOCK=1` instead: each `.nfo`
+gets `<lockdata>true</lockdata>`, which tells the server to treat the title as
+locked and leave it alone, while your own titles keep using TMDB. To pull TMDB
+details for a locked title, unlock it in its metadata editor and refresh it.
 
 How complete the details are depends on the provider. For shows and episodes
 it's usually good. For movies the catalog only has the title, year, rating,
