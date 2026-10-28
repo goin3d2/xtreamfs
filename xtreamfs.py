@@ -80,6 +80,8 @@ class Config:
         self.shrink_guard = float(env("SHRINK_GUARD_PERCENT", "25"))
         # Put movies in one subfolder per provider category: Movies/<Category>/<Title>.
         self.movie_layout = "category" if env("MOVIE_CATEGORY_FOLDERS", "0") == "1" else "flat"
+        # Same for shows: TV/<Category>/<Show>.
+        self.series_layout = "category" if env("SERIES_CATEGORY_FOLDERS", "0") == "1" else "flat"
         # Optional folder that gets a .strm copy of the whole tree (for Emby/Jellyfin).
         self.strm_dir = env("STRM_DIR", "").rstrip("/")
         self.shrink_guard_min = int(env("SHRINK_GUARD_MIN", "50"))  # ignore tiny libraries
@@ -337,7 +339,7 @@ NAMING_VERSION = 2  # bump when the naming rules change
 
 
 def build_tree(catalog, xt: Xtream, strip_prefix=True, state=None, overrides=None,
-               movie_layout="flat"):
+               movie_layout="flat", series_layout="flat"):
     """Build the folder tree from a catalog.
 
     `state` remembers, from earlier builds, the path each title was given and
@@ -354,7 +356,11 @@ def build_tree(catalog, xt: Xtream, strip_prefix=True, state=None, overrides=Non
     # Switching between flat and per-category movie folders re-places every movie once.
     if state.get("movie_layout", "flat") != movie_layout:
         old_paths = {k: v for k, v in old_paths.items() if not k.startswith("m")}
+    # Likewise for shows.
+    if state.get("series_layout", "flat") != series_layout:
+        old_paths = {k: v for k, v in old_paths.items() if not k.startswith("s")}
     movie_cat_names = (catalog.get("categories") or {}).get("movie", {})
+    series_cat_names = (catalog.get("categories") or {}).get("series", {})
     old_seen = state.get("first_seen", {})
     paths, first_seen = {}, {}
     now = int(time.time())
@@ -428,10 +434,19 @@ def build_tree(catalog, xt: Xtream, strip_prefix=True, state=None, overrides=Non
         folder = old_paths.get(skey)
         if not folder or folder in tree.dirs or not folder.startswith(f"/{root}/"):
             show = safe(f"{title} ({year})" if year else title)
-            folder = tree.unique(f"/{root}/{safe(show + tmdb_tag(tmdb_of(s)))}")
+            parent = f"/{root}"
+            if series_layout == "category" and root == "TV":
+                # TV/<category name>/<show>: each show is filed under one category.
+                cat = series_cat_names.get(str(s.get("category_id") or "")) or "Other"
+                parent = f"/{root}/{safe(cat)}"
+            folder = tree.unique(f"{parent}/{safe(show + tmdb_tag(tmdb_of(s)))}")
         paths[skey] = folder
+        # Register the show folder and any category folder above it.
+        parent, name = folder.rsplit("/", 1)
+        if parent != f"/{root}":
+            tree.dirs[f"/{root}"].add(parent.rsplit("/", 1)[1])
+        tree.dirs.setdefault(parent, set()).add(name)
         tree.dirs.setdefault(folder, set())
-        tree.dirs[f"/{root}"].add(folder.rsplit("/", 1)[1])
         # Episode file names come from the show folder, so they stay stable too.
         ep_title = folder.rsplit("/", 1)[1]
         ep_title = re.sub(r"\s*\{tmdb-\d+\}$", "", ep_title)
@@ -453,7 +468,8 @@ def build_tree(catalog, xt: Xtream, strip_prefix=True, state=None, overrides=Non
 
     tree.finish()
     dirs = settle_dir_times(tree, state.get("dirs"), now)
-    return tree, {"naming": NAMING_VERSION, "movie_layout": movie_layout, "paths": paths,
+    return tree, {"naming": NAMING_VERSION, "movie_layout": movie_layout,
+                  "series_layout": series_layout, "paths": paths,
                   "first_seen": first_seen, "dirs": dirs}
 
 
@@ -1035,7 +1051,8 @@ class XtreamFS(fuse.Operations):
         if catalog:
             self.tree, self.state = build_tree(catalog, self.xt,
                                                cfg.strip_prefix, self.state,
-                                               cfg.overrides, cfg.movie_layout)
+                                               cfg.overrides, cfg.movie_layout,
+                                               cfg.series_layout)
             log.info("Loaded cached catalog: %d files", len(self.tree.files))
             if self.strm:
                 self.strm.sync_in_background(self.tree, self.is_unavailable)
@@ -1140,7 +1157,8 @@ class XtreamFS(fuse.Operations):
                         pass
                 tree, state = build_tree(catalog, self.xt,
                                          self.cfg.strip_prefix, self.state,
-                                         self.cfg.overrides, self.cfg.movie_layout)
+                                         self.cfg.overrides, self.cfg.movie_layout,
+                                         self.cfg.series_layout)
                 with self.tree_lock:
                     self.tree = tree
                 self.catalog, self.state = catalog, state
