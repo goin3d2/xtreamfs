@@ -105,7 +105,7 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `SERIES_OVERRIDES` | (empty) | Shows sent to a folder by TMDB ID, e.g. `31910,46260=Anime` |
 | `MOVIE_OVERRIDES` | (empty) | Movies sent to a folder by TMDB ID |
 | `MOVIE_CATEGORY_FOLDERS` | `0` | `1` puts each movie in a subfolder for its provider category: `Movies/<Category>/<Title (Year)>` |
-| `SERIES_CATEGORY_FOLDERS` | `0` | `1` does the same for shows: `TV/<Category>/<Show (Year)>` |
+| `SERIES_CATEGORY_FOLDERS` | `0` | `1` does the same for shows: `TV/<Category>/<Show (Year)>`. Each category folder must then be added to the TV library separately (see below) |
 | `STRM_DIR` | (empty) | Folder that gets a `.strm` copy of the whole library, e.g. `/strm` |
 | `STRM_NFO` | `0` | `1` also writes `.nfo` metadata files next to the `.strm` files |
 | `STRM_NFO_LOCK` | `0` | `1` marks those `.nfo` files locked, so the server skips online lookups for them |
@@ -148,6 +148,14 @@ TV/4K Series/Shogun (2024) {tmdb-126308}/Season 01/...
 It works the same way: a show stays in its folder if the provider moves it,
 and turning the setting on or off moves every show once. Folders from
 `SERIES_FOLDERS` and `SERIES_OVERRIDES` (Anime, say) stay flat.
+
+**Don't point a TV library at `TV` with this on.** Plex, Emby and Jellyfin TV
+libraries expect each folder directly under the library folder to be a show,
+so they take `Drama`, `Comedy` and the other category folders for shows and
+pile hundreds of real shows into each. To use it, add every category folder
+(`TV/Drama`, `TV/Comedy`, ...) to the library separately, and add new ones when
+the provider creates them. Otherwise leave it off. Movie libraries don't have
+this problem.
 
 ## A .strm copy for Emby or Jellyfin
 
