@@ -260,7 +260,10 @@ those titles.
 - **Naming:** titles become `Title (Year)`. When the provider supplies a TMDB
   ID, the folder gets a `{tmdb-…}` tag so Plex matches it exactly. When the
   provider lists the same movie twice, both files go in one folder and Plex
-  shows them as two versions.
+  shows them as two versions. Shows work the same way: when the provider lists a
+  show more than once (a regular and a 4K copy, say), every copy goes in one
+  folder and the extra copies' episodes are labelled, e.g.
+  `Show - S01E01 - 4K` and `Show - S01E01 - 4K DV`.
 - **Refreshing:** the catalog is re-read every `REFRESH_HOURS`, and right
   away whenever you change the categories in `.env` and restart. To refresh
   now without restarting, run `docker exec xtreamfs touch /config/refresh`.

@@ -424,20 +424,49 @@ def build_tree(catalog, xt: Xtream, strip_prefix=True, state=None, overrides=Non
                                   seen(key, m.get("added")), ("m", m)))
 
     # ---- Series --------------------------------------------------------------
+    # The same show listed more than once by the provider (a 4K and a regular
+    # copy, say) goes in one folder, with the extra copies' episodes labelled
+    # ("Show - S01E01 - 4K"); Plex and Emby show them as versions of one episode.
     shows = [s for s in catalog.get("series", []) if (s.get("_info") or {}).get("episodes")]
-    shows.sort(key=lambda s: f"s{s.get('series_id')}" not in old_paths)
+
+    def show_root(s):
+        return series_over.get(str(tmdb_of(s) or "")) or s.get("_folder") or "TV"
+
+    def copy_label(s):
+        cat = series_cat_names.get(str(s.get("category_id") or ""), "")
+        if re.search(r"dolby\s*vision", cat, re.I):
+            return "4K DV"
+        if QUALITY_RE.match(cat) or QUALITY_RE.match(str(s.get("name") or "")):
+            return "4K"
+        return None
+
+    groups = OrderedDict()
     for s in shows:
-        skey = f"s{s.get('series_id')}"
-        episodes = s["_info"]["episodes"]
-        if isinstance(episodes, list):  # some panels return a list of lists
-            episodes = {str(i + 1): v for i, v in enumerate(episodes)}
+        t = str(tmdb_of(s) or "").strip()
+        ident = t if t.isdigit() and t != "0" else f"sid{s.get('series_id')}"
+        groups.setdefault((show_root(s), ident), []).append(s)
+    group_list = []
+    for (root, _), members in groups.items():
+        # The regular copy first (it gets the unlabelled files), then any copy
+        # that already had a path.
+        members.sort(key=lambda m: (copy_label(m) is not None,
+                                    f"s{m.get('series_id')}" not in old_paths))
+        group_list.append((root, members))
+    # Shows that already have a path go first, so they keep it.
+    group_list.sort(key=lambda g: not any(f"s{m.get('series_id')}" in old_paths for m in g[1]))
+
+    for root, members in group_list:
+        s = members[0]
         title, year = split_year(clean_title(s.get("name"), strip_prefix),
                                  s.get("year") or s.get("releaseDate"))
-        root = series_over.get(str(tmdb_of(s) or "")) or s.get("_folder") or "TV"
         tree.dirs["/"].add(root)
         tree.dirs.setdefault(f"/{root}", set())
-        folder = old_paths.get(skey)
-        if not folder or folder in tree.dirs or not folder.startswith(f"/{root}/"):
+        # Reuse an earlier folder of any copy, preferring one without a "(2)" suffix.
+        olds = [old_paths.get(f"s{m.get('series_id')}") for m in members]
+        olds = [f for f in olds if f and f not in tree.dirs and f.startswith(f"/{root}/")]
+        olds.sort(key=lambda f: bool(re.search(r" \(\d+\)$", f)))
+        folder = olds[0] if olds else None
+        if not folder:
             show = safe(f"{title} ({year})" if year else title)
             parent = f"/{root}"
             if series_layout == "category" and root == "TV":
@@ -445,7 +474,6 @@ def build_tree(catalog, xt: Xtream, strip_prefix=True, state=None, overrides=Non
                 cat = series_cat_names.get(str(s.get("category_id") or "")) or "Other"
                 parent = f"/{root}/{safe(cat)}"
             folder = tree.unique(f"{parent}/{safe(show + tmdb_tag(tmdb_of(s)))}")
-        paths[skey] = folder
         # Register the show folder and any category folder above it.
         parent, name = folder.rsplit("/", 1)
         if parent != f"/{root}":
@@ -456,20 +484,26 @@ def build_tree(catalog, xt: Xtream, strip_prefix=True, state=None, overrides=Non
         ep_title = folder.rsplit("/", 1)[1]
         ep_title = re.sub(r"\s*\{tmdb-\d+\}$", "", ep_title)
         ep_title = re.sub(r"\s*\((19|20)\d{2}\)( \(\d+\))?$", "", ep_title) or title
-        for season_key, eps in episodes.items():
-            for ep in eps or []:
-                eid = ep.get("id")
-                key = f"e{eid}"
-                season = to_int(ep.get("season") or season_key, 0)
-                num = to_int(ep.get("episode_num"), 0)
-                ext = ext_of(ep.get("container_extension"))
-                name = safe(f"{ep_title} - S{season:02d}E{num:02d}.{ext}")
-                path = f"{folder}/Season {season:02d}/{name}"
-                if path in tree.files:
-                    path = path[: -len(ext) - 1] + f" - {eid}.{ext}"
-                tree.add_file(path, Entry(
-                    xt.episode_url(eid, ext), key,
-                    seen(key, ep.get("added") or s.get("last_modified")), ("e", ep, s)))
+        for i, m in enumerate(members):
+            paths[f"s{m.get('series_id')}"] = folder
+            label = copy_label(m) if i else None
+            episodes = m["_info"]["episodes"]
+            if isinstance(episodes, list):  # some panels return a list of lists
+                episodes = {str(n + 1): v for n, v in enumerate(episodes)}
+            for season_key, eps in episodes.items():
+                for ep in eps or []:
+                    eid = ep.get("id")
+                    key = f"e{eid}"
+                    season = to_int(ep.get("season") or season_key, 0)
+                    num = to_int(ep.get("episode_num"), 0)
+                    ext = ext_of(ep.get("container_extension"))
+                    base = f"{ep_title} - S{season:02d}E{num:02d}" + (f" - {label}" if label else "")
+                    path = f"{folder}/Season {season:02d}/{safe(base + '.' + ext)}"
+                    if path in tree.files:
+                        path = path[: -len(ext) - 1] + f" - {eid}.{ext}"
+                    tree.add_file(path, Entry(
+                        xt.episode_url(eid, ext), key,
+                        seen(key, ep.get("added") or m.get("last_modified")), ("e", ep, m)))
 
     tree.finish()
     dirs = settle_dir_times(tree, state.get("dirs"), now)
