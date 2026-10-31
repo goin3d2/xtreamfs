@@ -53,6 +53,9 @@ EDITABLE = {
     "MAX_STREAMS", "USER_AGENT", "CACHE_MB", "CACHE_EDGE_MB", "STATS_INTERVAL",
     "LOG_LEVEL",
 }
+# The provider login can also be saved from the page (its own section, never
+# shown back), so a first start can be set up entirely from the browser.
+CREDENTIALS = {"XTREAM_URL", "XTREAM_USER", "XTREAM_PASS"}
 SETTINGS = {}
 
 
@@ -65,7 +68,8 @@ def load_settings():
     try:
         with open(settings_path()) as f:
             data = json.load(f)
-        SETTINGS = {k: str(v) for k, v in data.items() if k in EDITABLE and v is not None}
+        SETTINGS = {k: str(v) for k, v in data.items()
+                    if k in EDITABLE | CREDENTIALS and v is not None}
     except (OSError, ValueError):
         SETTINGS = {}
 
@@ -113,8 +117,10 @@ class RingLog(logging.Handler):
 
     def since(self, after, limit=1000):
         with self.ring_lock:
-            out = [x for x in self.lines if x[0] > after]
-            return out[-limit:], self.seq
+            out = [x for x in self.lines if x[0] > after][-limit:]
+            seq = self.seq
+        # Mask again on the way out, in case a login was added after a line was logged.
+        return [(n, lv, scrub(t)) for n, lv, t in out], seq
 
 
 RING = RingLog()
@@ -129,10 +135,13 @@ def scrub(text):
 
 
 class Config:
+    def has_login(self):
+        return bool(self.url and self.user and self.password)
+
     def __init__(self):
-        self.url = env("XTREAM_URL", required=True).rstrip("/")
-        self.user = env("XTREAM_USER", required=True)
-        self.password = env("XTREAM_PASS", required=True)
+        self.url = (env("XTREAM_URL", "") or "").strip().rstrip("/")
+        self.user = (env("XTREAM_USER", "") or "").strip()
+        self.password = env("XTREAM_PASS", "") or ""
         self.mount = env("MOUNT_POINT", "/mnt/xtream")
         self.cache_dir = env("CACHE_DIR", "/config")
         # Category IDs or names, or "all" for every category the provider has
@@ -1360,6 +1369,91 @@ class XtreamFS(fuse.Operations):
     def request_refresh(self):
         open(self.trigger_path, "w").close()
 
+    # ---- provider login ----------------------------------------------------
+
+    def check_login(self, url, user, password):
+        """Ask the provider about an account. Returns a summary; never the password."""
+        url = (url or "").strip().rstrip("/")
+        if not (url and user and password):
+            return {"ok": False, "error": "Enter the server address, username and password."}
+        if not re.match(r"https?://", url):
+            return {"ok": False, "error": "The server address should start with http:// or https://"}
+        SECRETS[:] = sorted(set(SECRETS) | {x for x in (user, password) if len(x) >= 3},
+                            key=len, reverse=True)
+        try:
+            r = requests.get(f"{url}/player_api.php",
+                             params={"username": user, "password": password},
+                             headers={"User-Agent": self.cfg.user_agent}, timeout=15)
+        except requests.RequestException as e:
+            return {"ok": False, "error": f"Couldn't reach the server: {scrub(e)}"}
+        if r.status_code != 200:
+            return {"ok": False, "error": f"The server answered HTTP {r.status_code}."}
+        try:
+            data = r.json()
+        except ValueError:
+            return {"ok": False, "error": "The server answered, but not like an Xtream panel. "
+                                          "Check the address, including the port."}
+        info = (data or {}).get("user_info") or {} if isinstance(data, dict) else {}
+        if str(info.get("auth")) != "1":
+            return {"ok": False, "error": "The provider rejected this username and password."}
+        server = data.get("server_info") or {}
+
+        def num(v):
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+        return {"ok": True, "status": info.get("status"), "expires": num(info.get("exp_date")),
+                "trial": str(info.get("is_trial")) == "1", "created": num(info.get("created_at")),
+                "max_connections": num(info.get("max_connections")),
+                "active_connections": num(info.get("active_cons")),
+                "server_timezone": server.get("timezone"), "checked": int(time.time())}
+
+    def account(self, fresh=False):
+        """The current login's account details, cached for 10 minutes."""
+        cached = getattr(self, "_account", None)
+        if cached and not fresh and time.time() - cached["checked"] < 600:
+            return cached
+        if not self.cfg.has_login():
+            res = {"ok": False, "error": "No provider login yet.", "checked": int(time.time())}
+        else:
+            res = self.check_login(self.cfg.url, self.cfg.user, self.cfg.password)
+            res.setdefault("checked", int(time.time()))
+        self._account = res
+        return res
+
+    def login_view(self):
+        def source(k):
+            return "page" if k in SETTINGS else ("env" if os.environ.get(k) else "none")
+        return {"url": self.cfg.url, "user": self.cfg.user,
+                "password_set": bool(self.cfg.password),
+                "sources": {k: source(k) for k in sorted(CREDENTIALS)}}
+
+    def save_login(self, url, user, password=None, force=False):
+        """Test and save a provider login. A blank password keeps the current one."""
+        url = (url or "").strip().rstrip("/")
+        user = (user or "").strip()
+        password = password or self.cfg.password
+        result = self.check_login(url, user, password)
+        if not result["ok"] and not force:
+            return dict(result, saved=False)
+        load_settings()
+        data = dict(SETTINGS, XTREAM_URL=url, XTREAM_USER=user, XTREAM_PASS=password)
+        tmp = settings_path() + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=1, sort_keys=True)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, settings_path())
+        load_settings()
+        changed = (url, user, password) != (self.cfg.url, self.cfg.user, self.cfg.password)
+        self.cfg.url, self.cfg.user, self.cfg.password = url, user, password
+        self.resolved.clear()  # remembered stream links belong to the old login
+        self._account = result if result["ok"] else None
+        if changed:
+            log.info("Provider login changed from the web page; refreshing")
+            self.request_refresh()  # stream links in the folders include the login
+        return dict(result, saved=True, refresh=changed)
+
     def accept_shrink(self):
         open(self.accept_path, "w").close()
 
@@ -1441,6 +1535,7 @@ class XtreamFS(fuse.Operations):
         tmp = settings_path() + ".tmp"
         with open(tmp, "w") as f:
             json.dump(data, f, indent=1, sort_keys=True)
+        os.chmod(tmp, 0o600)
         os.replace(tmp, settings_path())
         load_settings()
         new = Config()
@@ -1552,6 +1647,14 @@ class XtreamFS(fuse.Operations):
             STATUS["next_at"] = int(time.time() + delay)
             self._wait(delay)
             STATUS.update(started=int(time.time()), next_at=None)
+            if not self.cfg.has_login() or not (self.cfg.movie_cats or self.cfg.series_cats):
+                missing = ("provider login" if not self.cfg.has_login() else "categories")
+                log.warning("Not refreshing: no %s yet. Add it on the settings page "
+                            "(port %s).", missing, os.environ.get("WEB_PORT", "8099"))
+                STATUS["last"] = {"time": int(time.time()), "result": "waiting",
+                                  "detail": f"Add your {missing} on the settings page."}
+                delay = 24 * 3600  # until settings are saved, which triggers a refresh
+                continue
             try:
                 log.info("Refreshing catalog from provider")
                 set_phase("categories")
@@ -1779,6 +1882,8 @@ class XtreamFS(fuse.Operations):
 
 
 def list_categories(cfg):
+    if not cfg.has_login():
+        sys.exit("Set XTREAM_URL, XTREAM_USER and XTREAM_PASS first")
     xt = Xtream(cfg)
     for label, action in (("MOVIE_CATEGORIES", "get_vod_categories"),
                           ("SERIES_CATEGORIES", "get_series_categories")):
@@ -1796,10 +1901,7 @@ class Redact(logging.Filter):
         SECRETS[:] = sorted(set(SECRETS) | set(self.secrets), key=len, reverse=True)
 
     def filter(self, record):
-        msg = record.getMessage()
-        for s in self.secrets:
-            msg = msg.replace(s, "***")
-        record.msg, record.args = msg, None
+        record.msg, record.args = scrub(record.getMessage()), None
         return True
 
 
@@ -1818,9 +1920,11 @@ def main():
     if "--list-categories" in sys.argv:
         list_categories(cfg)
         return
+    if not cfg.has_login():
+        log.warning("No provider login yet: add it on the settings page")
     if not cfg.movie_cats and not cfg.series_cats:
-        sys.exit("Set MOVIE_CATEGORIES and/or SERIES_CATEGORIES "
-                 "(run with --list-categories to see them)")
+        log.warning("No categories selected yet: choose them on the settings page, "
+                    "or set MOVIE_CATEGORIES / SERIES_CATEGORIES")
     os.makedirs(cfg.mount, exist_ok=True)
     log.info("Mounting at %s (max %d provider connections)",
              cfg.mount, cfg.max_streams)

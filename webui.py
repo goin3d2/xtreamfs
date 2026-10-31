@@ -155,6 +155,7 @@ def start(fs, port, password=""):
                         "catalog": fs.catalog_summary(), "started": fs.start,
                         "unavailable": len(fs.unavailable),
                         "strm_dir": fs.cfg.strm_dir,
+                        "max_streams": fs.cfg.max_streams,
                         "overrides_from_page": sorted(xf.SETTINGS)})
                 if u.path == "/api/log":
                     after = int((q.get("after") or ["0"])[0])
@@ -162,6 +163,11 @@ def start(fs, port, password=""):
                     return self._send(200, {"last": last, "lines": lines})
                 if u.path == "/api/settings":
                     return self._send(200, settings_view())
+                if u.path == "/api/login":
+                    return self._send(200, dict(fs.login_view(), protected=bool(password)))
+                if u.path == "/api/account":
+                    fresh = (q.get("fresh") or ["0"])[0] == "1"
+                    return self._send(200, fs.account(fresh))
                 if u.path == "/api/categories":
                     live = (q.get("live") or ["0"])[0] == "1"
                     return self._send(200, fs.categories_view(live))
@@ -182,6 +188,13 @@ def start(fs, port, password=""):
                     return self._send(200, {"ok": True})
                 if u.path == "/api/settings":
                     return self._send(200, fs.save_settings(validate(self._body())))
+                if u.path in ("/api/login/test", "/api/login"):
+                    b = self._body()
+                    url, user = str(b.get("url") or ""), str(b.get("user") or "")
+                    pw = str(b.get("password") or "") or fs.cfg.password
+                    if u.path == "/api/login/test":
+                        return self._send(200, fs.check_login(url, user, pw))
+                    return self._send(200, fs.save_login(url, user, pw, bool(b.get("force"))))
                 self._send(404, {"error": "not found"})
             except ValueError as e:
                 self._send(400, {"error": xf.scrub(e)})

@@ -96,7 +96,7 @@ th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);verti
 th{font-weight:500;font-size:13px;color:var(--muted);white-space:nowrap}
 tr:last-child td{border-bottom:0}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
-input[type=text],input[type=number],select{background:var(--aisle);color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:7px 10px;font:inherit;width:100%}
+input[type=text],input[type=password],input[type=number],select{background:var(--aisle);color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:7px 10px;font:inherit;width:100%}
 input[type=text]::placeholder{color:#6d7095}
 input[type=checkbox]{accent-color:var(--marquee);width:16px;height:16px}
 
@@ -115,6 +115,7 @@ input[type=checkbox]{accent-color:var(--marquee);width:16px;height:16px}
 .field .help{grid-column:2;font-size:13px;color:var(--muted)}
 .field label{font-weight:500}
 
+#lnote.ok{color:var(--ok)}#lnote.bad{color:var(--bad)}
 .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(8px);background:var(--marquee);color:#1b1404;font-weight:500;padding:10px 18px;border-radius:9px;opacity:0;transition:opacity .25s,transform .25s;pointer-events:none;max-width:90vw;box-shadow:0 8px 30px rgba(0,0,0,.4)}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 
@@ -137,6 +138,7 @@ input[type=checkbox]{accent-color:var(--marquee);width:16px;height:16px}
     <button data-tab="status" class="on">Status</button>
     <button data-tab="categories">Categories</button>
     <button data-tab="settings">Settings</button>
+    <button data-tab="account">Account</button>
     <button data-tab="log">Log</button>
   </nav>
   <span id="phasepill">Connecting</span>
@@ -190,6 +192,39 @@ input[type=checkbox]{accent-color:var(--marquee);width:16px;height:16px}
   </div>
 </section>
 
+<section id="account">
+  <div id="acctwarn"></div>
+  <div class="card feature" style="margin-bottom:16px">
+    <div class="row" style="justify-content:space-between;align-items:flex-start">
+      <div>
+        <h2>Provider account</h2>
+        <div id="acctstate" class="big">…</div>
+        <div id="acctdetail" class="muted" style="margin-top:6px;font-size:15px"></div>
+      </div>
+      <button class="btn" id="acctcheck">Check again</button>
+    </div>
+    <div class="grid" id="acctgrid" style="margin-top:18px"></div>
+  </div>
+  <div class="card">
+    <h2>Login</h2>
+    <p class="muted" style="margin:0 0 6px">The same server address, username and password your IPTV player uses. Test checks them with the provider without saving. Save tests them again, then stores them and refreshes the catalog, because every stream link includes the login.</p>
+    <div class="field"><label for="lurl">Server address</label>
+      <input type="text" id="lurl" placeholder="http://provider.example.com:8080" autocomplete="off" spellcheck="false">
+      <div class="help" id="lurlsrc">Include the port if your provider gives one.</div></div>
+    <div class="field"><label for="luser">Username</label>
+      <input type="text" id="luser" autocomplete="off" spellcheck="false">
+      <div class="help" id="lusersrc"></div></div>
+    <div class="field"><label for="lpass">Password</label>
+      <input type="password" id="lpass" autocomplete="new-password">
+      <div class="help" id="lpasssrc"></div></div>
+    <div class="row" style="margin-top:16px">
+      <button class="btn" id="ltest">Test connection</button>
+      <button class="btn primary" id="lsave">Save login</button>
+      <span id="lnote"></span>
+    </div>
+  </div>
+</section>
+
 <section id="log">
   <div class="row" style="margin-bottom:10px">
     <input type="text" id="logfilter" placeholder="Filter, e.g. Episode lists, STRM, ERROR" style="max-width:360px">
@@ -218,7 +253,7 @@ let tab="status";
 document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{tab=b.dataset.tab;
   document.querySelectorAll("nav button").forEach(x=>x.classList.toggle("on",x===b));
   document.querySelectorAll("section").forEach(s=>s.classList.toggle("on",s.id===tab));
-  if(tab==="categories"&&!catData)loadCats(false);if(tab==="settings")loadSettings();if(tab==="log")scrollLog()});
+  if(tab==="categories"&&!catData)loadCats(false);if(tab==="settings")loadSettings();if(tab==="account")loadAccount(false);if(tab==="log")scrollLog()});
 
 /* status */
 const PH={idle:"Idle",categories:"Reading categories",movies:"Movie categories",series:"Series categories",episodes:"Downloading episode lists",building:"Building folders",saving:"Saving catalog"};
@@ -246,6 +281,8 @@ async function loadStatus(){
   // alerts
   let al="";
   if(s.shrink)al+=`<div class="alert bad"><b>Refresh held back.</b> ${esc(s.shrink)}. If the provider really removed these, <button class="btn danger" onclick="acceptShrink()">Accept the smaller catalog</button></div>`;
+  if(s.last&&s.last.result==="waiting")al+=`<div class="alert"><b>Not set up yet.</b> ${esc(s.last.detail)} <button class="btn" onclick="goTab('${/login/.test(s.last.detail)?"account":"categories"}')">Open ${/login/.test(s.last.detail)?"Account":"Categories"}</button></div>`;
+  maxStreams=d.max_streams;
   if(s.last&&s.last.result==="failed")al+=`<div class="alert bad"><b>Last refresh failed</b> ${ago(s.last.time,now)}: ${esc(s.last.detail)}</div>`;
   $("#alerts").innerHTML=al;
   // cards
@@ -360,6 +397,47 @@ $("#setsave").onclick=async()=>{
     toast(m);$("#setnote").textContent=r.restart.length?"Restart needed for: "+r.restart.join(", "):"";loadSettings()}catch(e){toast(e.message)}
 };
 async function resetField(name){try{await post("/api/settings",{[name]:null});toast("Back to the .env value.");loadSettings()}catch(e){toast(e.message)}}
+
+/* account */
+let maxStreams=null,acct=null;
+function goTab(t){document.querySelector(`nav button[data-tab=${t}]`).click()}
+function day(t){return t?new Date(t*1000).toLocaleDateString([], {year:"numeric",month:"short",day:"numeric"}):"–"}
+async function loadAccount(fresh){
+  try{
+    const [l,a]=await Promise.all([api("/api/login"),api("/api/account"+(fresh?"?fresh=1":""))]);
+    acct=a;
+    $("#acctwarn").innerHTML=l.protected?"":`<div class="alert"><b>This page has no password.</b> Anyone on your network can open it and change the login. Add <code>WEB_PASSWORD=…</code> to <code>.env</code> and run <code>docker compose up -d</code> to require one.</div>`;
+    if(document.activeElement!==$("#lurl"))$("#lurl").value=l.url||"";
+    if(document.activeElement!==$("#luser"))$("#luser").value=l.user||"";
+    $("#lpass").placeholder=l.password_set?"Saved. Leave blank to keep it.":"";
+    const src=k=>({page:"Saved on this page.",env:"From .env.",none:"Not set."})[l.sources[k]];
+    $("#lurlsrc").textContent="Include the port if your provider gives one. "+src("XTREAM_URL");
+    $("#lusersrc").textContent=src("XTREAM_USER");$("#lpasssrc").textContent=src("XTREAM_PASS");
+    renderAccount(a);
+  }catch(e){$("#acctstate").textContent="Unavailable";$("#acctdetail").textContent=e.message}
+}
+function renderAccount(a){
+  if(!a.ok){$("#acctstate").textContent="Not connected";$("#acctdetail").textContent=a.error||"";$("#acctgrid").innerHTML="";return}
+  const now=Date.now()/1000,days=a.expires?Math.floor((a.expires-now)/86400):null;
+  $("#acctstate").textContent=a.status||"Active";
+  $("#acctdetail").textContent=`Checked ${ago(a.checked,now)}${a.trial?", trial account":""}`;
+  const cards=[
+    ["Expires",a.expires?day(a.expires):"Never",days==null?"no end date":(days<0?"expired":`${days} day${days===1?"":"s"} left`)],
+    ["Connections",a.max_connections==null?"–":`${fmtN(a.active_connections??0)} of ${fmtN(a.max_connections)}`,"in use now, across all your devices"],
+    ["xtreamfs uses up to",maxStreams==null?"–":fmtN(maxStreams),a.max_connections&&maxStreams?(maxStreams>=a.max_connections?"your whole plan: none left for other devices":`leaving ${a.max_connections-maxStreams} for Emby, live TV and others`):"Max provider connections, on Settings"],
+  ];
+  $("#acctgrid").innerHTML=cards.map(([h,b,m])=>`<div class="card"><h2>${h}</h2><div class="big">${esc(b)}</div><div class="muted" style="font-size:12px">${esc(m)}</div></div>`).join("");
+}
+function loginBody(){return{url:$("#lurl").value.trim(),user:$("#luser").value.trim(),password:$("#lpass").value}}
+function note(msg,ok){const n=$("#lnote");n.textContent=msg;n.className=ok?"ok":"bad"}
+$("#acctcheck").onclick=()=>loadAccount(true);
+$("#ltest").onclick=async()=>{note("Testing…",true);try{const r=await post("/api/login/test",loginBody());
+  if(r.ok){note(`Login works: ${r.status||"Active"} account${r.max_connections?`, ${r.max_connections} connections`:""}.`,true);renderAccount(r)}else note(r.error,false)}catch(e){note(e.message,false)}};
+$("#lsave").onclick=async()=>{note("Testing and saving…",true);try{
+  let r=await post("/api/login",loginBody());
+  if(!r.saved){if(!confirm(`The test failed: ${r.error}\n\nSave this login anyway?`)){note(r.error,false);return}
+    r=await post("/api/login",Object.assign(loginBody(),{force:true}))}
+  $("#lpass").value="";note(r.refresh?"Saved. A refresh starts within about 10 seconds.":"Saved. The login didn't change.",true);toast(r.refresh?"Login saved. Refreshing the catalog.":"Login saved.");loadAccount(false)}catch(e){note(e.message,false)}};
 
 /* polling */
 async function tick(){await Promise.all([loadStatus(),loadLog()])}

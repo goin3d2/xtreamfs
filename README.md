@@ -78,7 +78,7 @@ and a TV Shows library pointing at `/xtream/TV`.
 
 ## Settings and status page
 
-xtreamfs serves a page at `http://<server>:8099` with four tabs:
+xtreamfs serves a page at `http://<server>:8099` with five tabs:
 
 - **Status:** what a refresh is doing right now (reading categories,
   downloading episode lists with a progress bar and time left, building
@@ -91,14 +91,23 @@ xtreamfs serves a page at `http://<server>:8099` with four tabs:
   categories** marks any new ones. **Save and refresh** applies the changes.
 - **Settings:** everything else from `.env` apart from the provider login,
   with a note on where each value comes from.
+- **Account:** your provider account's status, expiry date and connections in
+  use, next to how many xtreamfs is allowed to use. Enter or change the server
+  address, username and password here: **Test connection** checks them with
+  the provider without saving, and **Save login** tests, saves and refreshes
+  the catalog (every stream link includes the login). The saved password is
+  never shown again.
 - **Log:** the live log, with a filter. The provider login is masked.
 
-Settings saved on the page go in `config/settings.json` and take priority over
-`.env`; **Reset** on a setting goes back to the `.env` value. Most changes
+You can also start with no login or categories in `.env` at all and set
+everything up from the page.
+
+Settings saved on the page go in `config/settings.json` (readable only by
+root, since it can hold the login) and take priority over `.env`; **Reset** on a setting goes back to the `.env` value. Most changes
 apply straight away. The ones marked *restart* (connection limit, user agent,
 cache sizes, stats interval) need `docker compose up -d`, followed by a Plex
-restart. Set `WEB_PASSWORD` to require a password, or `WEB_PORT=0` to turn the
-page off.
+restart. Set `WEB_PASSWORD` to require a password, which is worth doing since
+the page can change the login, or `WEB_PORT=0` to turn the page off.
 
 ## Keeping the provider happy
 
