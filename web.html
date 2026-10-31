@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xtreamfs</title>
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--ink:#1d2329;--muted:#66717d;--line:#e2e6ea;--accent:#2f6fde;--ok:#1f8a4c;--warn:#b7791f;--bad:#c53030;--code:#f0f2f5}
+@media (prefers-color-scheme:dark){:root{--bg:#121417;--panel:#1b1f24;--ink:#e6e9ed;--muted:#97a1ab;--line:#2c3239;--accent:#5b93f0;--ok:#48bb78;--warn:#ecc94b;--bad:#fc8181;--code:#15181c}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{display:flex;align-items:center;gap:16px;padding:12px 20px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:2;flex-wrap:wrap}
+header h1{font-size:17px;margin:0;font-weight:650}
+nav{display:flex;gap:4px;flex-wrap:wrap}
+nav button{background:none;border:0;color:var(--muted);padding:6px 12px;border-radius:6px;font:inherit;cursor:pointer}
+nav button.on{background:var(--code);color:var(--ink);font-weight:600}
+#phasepill{margin-left:auto;font-size:12px;padding:3px 10px;border-radius:99px;background:var(--code);color:var(--muted);white-space:nowrap}
+#phasepill.busy{color:var(--accent)}
+main{max-width:1100px;margin:0 auto;padding:20px 16px 60px}
+section{display:none}section.on{display:block}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+.card{min-width:0;overflow-wrap:anywhere;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.card h2{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:0 0 8px;font-weight:600}
+.big{font-size:24px;font-weight:650}
+.muted{color:var(--muted)}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button.btn{border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:7px 14px;border-radius:7px;font:inherit;cursor:pointer}
+button.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.btn.danger{border-color:var(--bad);color:var(--bad)}
+button.btn:disabled{opacity:.5;cursor:default}
+.bar{height:8px;background:var(--code);border-radius:99px;overflow:hidden;margin:8px 0 4px}
+.bar>div{height:100%;background:var(--accent);width:0;transition:width .4s}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
+th{font-size:12px;color:var(--muted);font-weight:600}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+input[type=text],input[type=number],select{background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:5px 8px;font:inherit;width:100%}
+.badge{display:inline-block;font-size:11px;padding:1px 7px;border-radius:99px;background:var(--code);color:var(--muted)}
+.badge.new{background:var(--accent);color:#fff}
+.badge.page{color:var(--accent)}
+.alert{overflow-wrap:anywhere;border-left:4px solid var(--warn);background:var(--panel);padding:10px 14px;border-radius:6px;margin-bottom:14px}
+.alert.bad{border-color:var(--bad)}
+#logview{background:var(--code);border:1px solid var(--line);border-radius:8px;height:62vh;overflow:auto;padding:8px 10px;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-word}
+#logview .WARNING{color:var(--warn)}#logview .ERROR,#logview .CRITICAL{color:var(--bad)}
+.field{display:grid;grid-template-columns:240px 1fr;gap:4px 16px;padding:10px 0;border-bottom:1px solid var(--line)}
+.field .help{grid-column:2;font-size:12px;color:var(--muted)}
+.field label{font-weight:550}
+@media (max-width:640px){.field{grid-template-columns:1fr}.field .help{grid-column:1}}
+h3{margin:22px 0 4px;font-size:15px}
+.toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:9px 16px;border-radius:8px;opacity:0;transition:opacity .3s;pointer-events:none;max-width:90vw}
+.toast.show{opacity:1}
+.tablewrap{overflow-x:auto}
+</style>
+</head>
+<body>
+<header>
+  <h1>xtreamfs</h1>
+  <nav>
+    <button data-tab="status" class="on">Status</button>
+    <button data-tab="categories">Categories</button>
+    <button data-tab="settings">Settings</button>
+    <button data-tab="log">Log</button>
+  </nav>
+  <span id="phasepill">…</span>
+</header>
+<main>
+
+<section id="status" class="on">
+  <div id="alerts"></div>
+  <div class="card" style="margin-bottom:14px">
+    <div class="row" style="justify-content:space-between">
+      <div>
+        <h2>Catalog refresh</h2>
+        <div id="phase" class="big">…</div>
+        <div id="phasedetail" class="muted"></div>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="refreshbtn">Refresh now</button>
+      </div>
+    </div>
+    <div class="bar"><div id="bar"></div></div>
+    <div id="phasemeta" class="muted"></div>
+    <div id="recent" style="margin-top:10px;max-height:9.5em;overflow:auto;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace" class="muted"></div>
+  </div>
+  <div class="grid" id="cards"></div>
+  <div class="card" style="margin-top:14px">
+    <h2>Folders</h2>
+    <div class="tablewrap"><table id="folders"></table></div>
+  </div>
+  <div class="card" style="margin-top:14px">
+    <h2>Category changes at the provider</h2>
+    <div id="changes" class="muted">None seen since xtreamfs started.</div>
+  </div>
+</section>
+
+<section id="categories">
+  <div class="alert">Changes here are saved when you press <b>Save and refresh</b>, which starts a catalog refresh. Unticked categories are left out; a folder name gives a category its own top-level folder (and its own Plex/Emby library).</div>
+  <div class="row" style="margin-bottom:12px">
+    <button class="btn" id="livebtn">Check the provider for new categories</button>
+    <button class="btn primary" id="catsave">Save and refresh</button>
+    <span id="catnote" class="muted"></span>
+  </div>
+  <div id="catpanes"></div>
+</section>
+
+<section id="settings">
+  <div class="alert">Settings saved here are stored in <code>config/settings.json</code> and take priority over <code>.env</code>. Use <b>Reset</b> to go back to the <code>.env</code> value. Your provider login stays in <code>.env</code> only. Settings marked <span class="badge">restart</span> need <code>docker compose up -d</code> (and a Plex restart) to take effect.</div>
+  <div id="fields"></div>
+  <div class="row" style="margin-top:16px">
+    <button class="btn primary" id="setsave">Save</button>
+    <span id="setnote" class="muted"></span>
+  </div>
+</section>
+
+<section id="log">
+  <div class="row" style="margin-bottom:10px">
+    <input type="text" id="logfilter" placeholder="Filter, e.g. Episode lists, STRM, ERROR" style="max-width:360px">
+    <label class="row muted"><input type="checkbox" id="logfollow" checked> Follow</label>
+    <label class="row muted"><input type="checkbox" id="lognostats"> Hide provider stats</label>
+    <button class="btn" id="logclear">Clear view</button>
+  </div>
+  <div id="logview"></div>
+</section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const $=s=>document.querySelector(s), esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fmtN=n=>n==null?"–":Number(n).toLocaleString();
+function ago(t,now){if(!t)return"–";let d=Math.max(0,(now||Date.now()/1000)-t);if(d<60)return Math.round(d)+"s ago";if(d<3600)return Math.round(d/60)+" min ago";if(d<86400)return(d/3600).toFixed(1)+" h ago";return(d/86400).toFixed(1)+" days ago"}
+function inT(t,now){if(!t)return"–";let d=t-now;if(d<=0)return"now";if(d<3600)return"in "+Math.round(d/60)+" min";return"in "+(d/3600).toFixed(1)+" h"}
+function dur(s){if(s==null)return"";s=Math.round(s);if(s<90)return s+" s";if(s<5400)return Math.round(s/60)+" min";return(s/3600).toFixed(1)+" h"}
+function clock(t){return t?new Date(t*1000).toLocaleString([], {weekday:"short",hour:"2-digit",minute:"2-digit"}):"–"}
+function toast(m){const t=$("#toast");t.textContent=m;t.classList.add("show");clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove("show"),3500)}
+async function api(path,opt){const r=await fetch(path,opt);const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.statusText);return j}
+const post=(p,b)=>api(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b||{})});
+
+/* tabs */
+let tab="status";
+document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{tab=b.dataset.tab;
+  document.querySelectorAll("nav button").forEach(x=>x.classList.toggle("on",x===b));
+  document.querySelectorAll("section").forEach(s=>s.classList.toggle("on",s.id===tab));
+  if(tab==="categories"&&!catData)loadCats(false);if(tab==="settings")loadSettings();if(tab==="log")scrollLog()});
+
+/* status */
+const PH={idle:"Idle",categories:"Reading categories",movies:"Movie categories",series:"Series categories",episodes:"Downloading episode lists",building:"Building folders",saving:"Saving catalog"};
+async function loadStatus(){
+  let d;try{d=await api("/api/status")}catch(e){$("#phasepill").textContent="offline";return}
+  const s=d.status,now=d.now,c=d.catalog||{};
+  const busy=s.phase!=="idle";
+  const strmBusy=s.strm&&s.strm.running;
+  $("#phasepill").textContent=busy?PH[s.phase]||s.phase:(strmBusy?"Writing .strm files":"Idle");
+  $("#phasepill").classList.toggle("busy",busy||strmBusy);
+  $("#phase").textContent=busy?PH[s.phase]||s.phase:(strmBusy?"Writing .strm files":"Idle");
+  let pct=0,detail="",meta="";
+  if(busy){
+    if(s.total){pct=Math.round(s.done*100/s.total);detail=`${fmtN(s.done)} of ${fmtN(s.total)}${s.phase==="episodes"?" shows":" categories"} (${pct}%)`;}
+    if(s.detail)detail+=(detail?" · ":"")+esc(s.detail);
+    meta=`Started ${ago(s.started,now)}`+(s.eta!=null&&s.phase==="episodes"?` · about ${dur(s.eta)} left`:"");
+  }else{
+    meta=`Next scheduled refresh ${inT(s.next_at,now)} (${clock(s.next_at)})`;
+    if(s.last)detail=lastText(s.last,now);
+  }
+  $("#bar").style.width=(busy?pct:0)+"%";
+  $("#phasedetail").innerHTML=detail;$("#phasemeta").textContent=meta;
+  $("#refreshbtn").disabled=busy;
+  // alerts
+  let al="";
+  if(s.shrink)al+=`<div class="alert bad"><b>Refresh held back.</b> ${esc(s.shrink)}. If the provider really removed these, <button class="btn danger" onclick="acceptShrink()">Accept the smaller catalog</button></div>`;
+  if(s.last&&s.last.result==="failed")al+=`<div class="alert bad"><b>Last refresh failed</b> ${ago(s.last.time,now)}: ${esc(s.last.detail)}</div>`;
+  $("#alerts").innerHTML=al;
+  // cards
+  const st=s.strm;
+  const cards=[
+    ["Shows",fmtN(c.shows),`${fmtN(c.episodes)} episodes`],
+    ["Movies",fmtN(c.movies),`${fmtN(c.files)} files in the mount`],
+    ["Catalog",c.fetched?ago(c.fetched,now):"–",s.last&&s.last.result==="ok"?`last refresh took ${dur(s.last.seconds)}`:""],
+    [".strm copy",st?(st.running?"Writing…":(st.error?"Failed":fmtN(st.files))):(d.strm_dir?"–":"Off"),st&&!st.running&&!st.error?`${fmtN(st.written)} written, ${fmtN(st.removed)} removed ${ago(st.time,now)}`:(st&&st.error?esc(st.error):"")],
+    ["Provider",s.provider?ago(s.provider.time,now):"quiet",s.provider?esc(s.provider.msg.replace(/^Provider, last \d+s: /,"")):"No streaming activity reported yet"],
+    ["Refused titles",fmtN(d.unavailable),"hidden for now, checked again later"],
+  ];
+  $("#cards").innerHTML=cards.map(([h,b,m])=>`<div class="card"><h2>${h}</h2><div class="big">${b}</div><div class="muted" style="font-size:12px">${m}</div></div>`).join("");
+  // folders
+  const rows=[];
+  for(const [f,n] of Object.entries(c.series_folders||{}))rows.push([f,"Shows",n]);
+  for(const [f,n] of Object.entries(c.movie_folders||{}))rows.push([f,"Movies",n]);
+  $("#folders").innerHTML="<tr><th>Folder</th><th>Type</th><th class=num>Titles</th></tr>"+rows.map(r=>`<tr><td>${esc(r[0])}</td><td class=muted>${r[1]}</td><td class=num>${fmtN(r[2])}</td></tr>`).join("");
+  // changes
+  if(s.changes&&s.changes.length)$("#changes").innerHTML=s.changes.slice().reverse().map(x=>`<div><b>${clock(x.time)}</b> ${x.kind}: ${x.added.length?"added "+esc(x.added.join(", ")):""}${x.added.length&&x.removed.length?"; ":""}${x.removed.length?"removed "+esc(x.removed.join(", ")):""}</div>`).join("");
+}
+function lastText(l,now){
+  if(l.result==="ok")return`Last refresh ${ago(l.time,now)}: ${fmtN(l.shows)} shows, ${fmtN(l.movies)} movies`;
+  if(l.result==="kept previous")return`Last refresh ${ago(l.time,now)} was held back by the shrink guard`;
+  return`Last refresh ${ago(l.time,now)} failed`;
+}
+$("#refreshbtn").onclick=async()=>{try{await post("/api/refresh");toast("Refresh requested. It starts within about 10 seconds.")}catch(e){toast(e.message)}};
+async function acceptShrink(){if(!confirm("Accept the smaller catalog? Titles the provider removed will disappear from the folders."))return;try{await post("/api/accept-shrink");toast("Accepted. A refresh starts within about 10 seconds.")}catch(e){toast(e.message)}}
+
+/* log */
+let logAfter=0,logLines=[];
+async function loadLog(){
+  let d;try{d=await api("/api/log?after="+logAfter)}catch(e){return}
+  if(d.last<logAfter){logAfter=0;logLines=[]}
+  if(d.lines.length){logLines.push(...d.lines);if(logLines.length>4000)logLines=logLines.slice(-4000);logAfter=d.last;renderLog();renderRecent()}
+}
+function renderLog(){
+  const f=$("#logfilter").value.toLowerCase(),ns=$("#lognostats").checked;
+  const el=$("#logview");
+  el.innerHTML=logLines.filter(([,,t])=>(!f||t.toLowerCase().includes(f))&&(!ns||!t.includes("Provider, last"))).map(([,lv,t])=>`<div class="${lv}">${esc(t)}</div>`).join("");
+  scrollLog();
+}
+function scrollLog(){if($("#logfollow").checked){const el=$("#logview");el.scrollTop=el.scrollHeight}}
+function renderRecent(){
+  const r=logLines.filter(([,,t])=>!t.includes("Provider, last")).slice(-8);
+  $("#recent").innerHTML=r.map(([,lv,t])=>`<div class="${lv}">${esc(t.replace(/^\d{4}-\d\d-\d\d /,""))}</div>`).join("");
+  $("#recent").scrollTop=1e9;
+}
+$("#logfilter").oninput=renderLog;$("#lognostats").onchange=renderLog;
+$("#logclear").onclick=()=>{logLines=[];renderLog()};
+
+/* categories */
+let catData=null;
+async function loadCats(live){
+  $("#catnote").textContent=live?"Asking the provider…":"";
+  try{catData=await api("/api/categories"+(live?"?live=1":""))}catch(e){$("#catnote").textContent=e.message;return}
+  const nNew=["movie","series"].reduce((a,k)=>a+catData[k].rows.filter(r=>r.new).length,0);
+  $("#catnote").textContent=live?(nNew?`${nNew} new categor${nNew>1?"ies":"y"} at the provider (marked NEW).`:"No new categories at the provider."):"";
+  $("#catpanes").innerHTML=["series","movie"].map(k=>{
+    const d=catData[k],label=k==="movie"?"Movies":"TV series";
+    const rows=d.rows.slice().sort((a,b)=>(b.new-a.new)||a.name.localeCompare(b.name));
+    return`<div class="card" style="margin-bottom:14px"><div class="row" style="justify-content:space-between"><h2 style="margin:0">${label}</h2>
+      <label class="row"><input type="checkbox" class="allbox" data-kind="${k}" ${d.all?"checked":""}> Include all categories, including ones the provider adds later</label></div>
+      <div class="tablewrap"><table><tr><th style="width:60px">Include</th><th style="width:70px">ID</th><th>Category</th><th class=num style="width:90px">Titles</th><th style="width:220px">Own folder</th></tr>
+      ${rows.map(r=>`<tr><td><input type="checkbox" class="inc" data-kind="${k}" data-id="${esc(r.id)}" ${r.included?"checked":""}></td>
+        <td class=muted>${esc(r.id)}</td><td>${esc(r.name)} ${r.new?'<span class="badge new">NEW</span>':""}</td>
+        <td class=num>${fmtN(r.count)}</td>
+        <td><input type="text" class="fold" data-kind="${k}" data-id="${esc(r.id)}" value="${esc(r.folder)}" placeholder="${k==="movie"?"Movies":"TV"}"></td></tr>`).join("")}
+      </table></div></div>`}).join("");
+}
+$("#livebtn").onclick=()=>loadCats(true);
+$("#catsave").onclick=async()=>{
+  if(!catData)return;
+  const out={};
+  for(const k of ["movie","series"]){
+    const P=k==="movie"?"MOVIE":"SERIES";
+    const all=document.querySelector(`.allbox[data-kind=${k}]`).checked;
+    const inc=[...document.querySelectorAll(`.inc[data-kind=${k}]`)];
+    if(all){out[P+"_CATEGORIES"]="all";out[P+"_EXCLUDE"]=inc.filter(x=>!x.checked).map(x=>x.dataset.id).join(",")}
+    else{out[P+"_CATEGORIES"]=inc.filter(x=>x.checked).map(x=>x.dataset.id).join(",");out[P+"_EXCLUDE"]=""}
+    out[P+"_FOLDERS"]=[...document.querySelectorAll(`.fold[data-kind=${k}]`)].filter(x=>x.value.trim()).map(x=>`${x.dataset.id}=${x.value.trim().replace(/,/g," ")}`).join(",");
+  }
+  if(!out.MOVIE_CATEGORIES&&!out.SERIES_CATEGORIES){toast("Select at least one category.");return}
+  try{const r=await post("/api/settings",out);toast(r.refresh?"Saved. A refresh starts within about 10 seconds.":"Saved. Nothing changed.");loadCats(false)}catch(e){toast(e.message)}
+};
+
+/* settings */
+let fieldData=[];
+async function loadSettings(){
+  try{fieldData=await api("/api/settings")}catch(e){$("#setnote").textContent=e.message;return}
+  let html="",group="";
+  for(const f of fieldData){
+    if(f.group!==group){group=f.group;html+=`<h3>${esc(group)}</h3>`}
+    let input;
+    if(f.kind==="bool")input=`<label class="row"><input type="checkbox" data-name="${f.name}" ${f.value==="1"?"checked":""}> On</label>`;
+    else if(f.kind.startsWith("choice:"))input=`<select data-name="${f.name}">${f.kind.slice(7).split(",").map(o=>`<option ${o===f.value?"selected":""}>${o}</option>`).join("")}</select>`;
+    else input=`<input type="${f.kind==="number"?"number":"text"}" step="any" data-name="${f.name}" value="${esc(f.value)}">`;
+    const src=f.source==="page"?'<span class="badge page">set here</span>':f.source==="env"?'<span class="badge">.env</span>':'<span class="badge">default</span>';
+    html+=`<div class="field"><label>${esc(f.label)} ${f.restart?'<span class="badge">restart</span>':""}</label>
+      <div class="row" style="flex-wrap:nowrap">${input} ${src} ${f.source==="page"?`<button class="btn" onclick="resetField('${f.name}')">Reset</button>`:""}</div>
+      <div class="help">${esc(f.help)} <code>${f.name}</code></div></div>`;
+  }
+  $("#fields").innerHTML=html;
+}
+function readField(el){return el.type==="checkbox"?(el.checked?"1":"0"):el.value}
+$("#setsave").onclick=async()=>{
+  const out={};
+  document.querySelectorAll("#fields [data-name]").forEach(el=>{const f=fieldData.find(x=>x.name===el.dataset.name);const v=readField(el);if(f&&v!==f.value)out[f.name]=v});
+  if(!Object.keys(out).length){toast("Nothing changed.");return}
+  try{const r=await post("/api/settings",out);
+    let m="Saved.";if(r.refresh)m+=" A refresh starts within about 10 seconds.";if(r.restart.length)m+=" Some changes need a container restart.";
+    toast(m);$("#setnote").textContent=r.restart.length?"Restart needed for: "+r.restart.join(", "):"";loadSettings()}catch(e){toast(e.message)}
+};
+async function resetField(name){try{await post("/api/settings",{[name]:null});toast("Back to the .env value.");loadSettings()}catch(e){toast(e.message)}}
+
+/* polling */
+async function tick(){await Promise.all([loadStatus(),loadLog()])}
+tick();setInterval(tick,2000);
+</script>
+</body>
+</html>

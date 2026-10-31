@@ -7,6 +7,9 @@ services:
     # Needed on Unraid for the FUSE mount to be shared back to the host.
     privileged: true
     env_file: .env
+    # Settings and status page: http://<server>:8099
+    ports:
+      - "8099:8099"
     environment:
       TZ: America/New_York
     volumes:

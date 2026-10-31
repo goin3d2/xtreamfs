@@ -7,11 +7,13 @@ RUN apt-get update \
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-COPY xtreamfs.py entrypoint.sh /app/
+COPY xtreamfs.py webui.py web.html entrypoint.sh /app/
 RUN chmod +x /app/entrypoint.sh
 
 ENV MOUNT_POINT=/mnt/xtream \
     CACHE_DIR=/config \
     PYTHONUNBUFFERED=1
+
+EXPOSE 8099
 
 ENTRYPOINT ["/app/entrypoint.sh"]

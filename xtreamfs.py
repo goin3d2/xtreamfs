@@ -41,11 +41,91 @@ log = logging.getLogger("xtreamfs")
 # --------------------------------------------------------------------------
 
 
+# Settings that can be changed from the web page. They're saved in
+# <CACHE_DIR>/settings.json and take precedence over .env. The provider login
+# and paths are never editable there.
+EDITABLE = {
+    "MOVIE_CATEGORIES", "SERIES_CATEGORIES", "MOVIE_EXCLUDE", "SERIES_EXCLUDE",
+    "MOVIE_FOLDERS", "SERIES_FOLDERS", "MOVIE_OVERRIDES", "SERIES_OVERRIDES",
+    "MOVIE_CATEGORY_FOLDERS", "SERIES_CATEGORY_FOLDERS", "REFRESH_HOURS",
+    "SHRINK_GUARD_PERCENT", "SHRINK_GUARD_MIN", "STRIP_PREFIX", "API_DELAY",
+    "STRM_NFO", "STRM_NFO_LOCK", "UNAVAILABLE_RETRY_HOURS", "REDIRECT_CACHE_MINUTES",
+    "MAX_STREAMS", "USER_AGENT", "CACHE_MB", "CACHE_EDGE_MB", "STATS_INTERVAL",
+    "LOG_LEVEL",
+}
+SETTINGS = {}
+
+
+def settings_path():
+    return os.path.join(os.environ.get("CACHE_DIR", "/config"), "settings.json")
+
+
+def load_settings():
+    global SETTINGS
+    try:
+        with open(settings_path()) as f:
+            data = json.load(f)
+        SETTINGS = {k: str(v) for k, v in data.items() if k in EDITABLE and v is not None}
+    except (OSError, ValueError):
+        SETTINGS = {}
+
+
 def env(name, default=None, required=False):
-    v = os.environ.get(name, default)
+    v = SETTINGS[name] if name in SETTINGS else os.environ.get(name, default)
     if required and not v:
         sys.exit(f"Missing required environment variable {name}")
     return v
+
+
+# What the web page shows: the current refresh step, the last result, etc.
+STATUS = {"phase": "idle", "detail": "", "done": 0, "total": 0, "eta": None,
+          "started": None, "next_at": None, "last": None, "shrink": None,
+          "changes": [], "strm": None, "provider": None}
+
+
+def set_phase(phase, detail="", done=0, total=0, eta=None):
+    STATUS.update(phase=phase, detail=detail, done=done, total=total, eta=eta)
+
+
+def episode_count(show):
+    eps = (show.get("_info") or {}).get("episodes") or {}
+    groups = eps.values() if isinstance(eps, dict) else eps
+    return sum(len(g or []) for g in groups)
+
+
+class RingLog(logging.Handler):
+    """Keeps the most recent log lines in memory for the web page."""
+
+    def __init__(self, size=3000):
+        super().__init__()
+        self.lines = collections.deque(maxlen=size)
+        self.seq = 0
+        self.ring_lock = threading.Lock()  # logging.Handler already uses self.lock
+
+    def emit(self, record):
+        try:
+            line = self.format(record)
+        except Exception:
+            return
+        with self.ring_lock:
+            self.seq += 1
+            self.lines.append((self.seq, record.levelname, line))
+
+    def since(self, after, limit=1000):
+        with self.ring_lock:
+            out = [x for x in self.lines if x[0] > after]
+            return out[-limit:], self.seq
+
+
+RING = RingLog()
+SECRETS = []  # provider login, masked anywhere it could be shown
+
+
+def scrub(text):
+    text = str(text)
+    for secret in SECRETS:
+        text = text.replace(secret, "***")
+    return text
 
 
 class Config:
@@ -163,7 +243,7 @@ def is_all(wanted):
     return any(w.strip().lower() == "all" for w in wanted)
 
 
-def resolve_categories(wanted, available, exclude=()):
+def resolve_categories(wanted, available, exclude=(), quiet=False):
     """Match wanted entries (IDs or names, case-insensitive, or "all") to
     category IDs, minus any excluded ones."""
     if not wanted:
@@ -180,7 +260,7 @@ def resolve_categories(wanted, available, exclude=()):
         if c:
             if str(c["category_id"]) not in out:
                 out.append(str(c["category_id"]))
-        else:
+        elif not quiet:
             log.warning("Category %r not found at provider; skipping", w)
     drop = set()
     for x in exclude:
@@ -209,6 +289,9 @@ def report_category_changes(kind, old, new, selected_all):
         return
     added = [f"{i} {new[i]}" for i in new if i not in old]
     removed = [f"{i} {old[i]}" for i in old if i not in new]
+    if added or removed:
+        STATUS["changes"] = (STATUS["changes"] + [{"time": int(time.time()), "kind": kind,
+                                                   "added": added, "removed": removed}])[-20:]
     if added:
         log.info("Provider added %s categories: %s%s", kind, ", ".join(added),
                  "" if selected_all else
@@ -550,7 +633,8 @@ def catalog_key(cfg: Config):
 def fetch_catalog(cfg: Config, xt: Xtream, old_catalog=None):
     """Pull the selected categories from the provider."""
     catalog = {"movies": [], "series": [], "fetched": int(time.time()),
-               "cats": catalog_key(cfg), "categories": {}}
+               "cats": catalog_key(cfg), "categories": {},
+               "counts": {"movie": {}, "series": {}}}
     old_cats = (old_catalog or {}).get("categories", {})
 
     if cfg.movie_cats:
@@ -560,8 +644,10 @@ def fetch_catalog(cfg: Config, xt: Xtream, old_catalog=None):
         report_category_changes("movie", old_cats.get("movie"), names, is_all(cfg.movie_cats))
         cats = resolve_categories(cfg.movie_cats, available, cfg.movie_exclude)
         movies = {}
-        for cid in cats:
+        for n, cid in enumerate(cats, 1):
+            set_phase("movies", names.get(cid, cid), n - 1, len(cats))
             items = xt.api("get_vod_streams", category_id=cid) or []
+            catalog["counts"]["movie"][cid] = len(items)
             log.info("Movies category %s (%s): %d titles", cid, names.get(cid, ""), len(items))
             folder = folder_for(cfg.movie_folders, cid, names.get(cid))
             for m in items:
@@ -575,11 +661,12 @@ def fetch_catalog(cfg: Config, xt: Xtream, old_catalog=None):
         catalog["movies"] = list(movies.values())
 
     if cfg.series_cats:
-        catalog["series"] = fetch_series(cfg, xt, old_catalog, catalog["categories"])
+        catalog["series"] = fetch_series(cfg, xt, old_catalog, catalog["categories"],
+                                         catalog["counts"]["series"])
     return catalog
 
 
-def fetch_series(cfg: Config, xt: Xtream, old_catalog=None, cat_record=None):
+def fetch_series(cfg: Config, xt: Xtream, old_catalog=None, cat_record=None, counts=None):
     """Fetch the selected series categories and each show's episode list.
 
     Episode lists are the slow part (one API call per show), so they are
@@ -616,8 +703,11 @@ def fetch_series(cfg: Config, xt: Xtream, old_catalog=None, cat_record=None):
                             names, is_all(cfg.series_cats))
     cats = resolve_categories(cfg.series_cats, available, cfg.series_exclude)
     by_id = {}
-    for cid in cats:
+    for n, cid in enumerate(cats, 1):
+        set_phase("series", names.get(cid, cid), n - 1, len(cats))
         items = xt.api("get_series", category_id=cid) or []
+        if counts is not None:
+            counts[cid] = len(items)
         log.info("Series category %s (%s): %d shows", cid, names.get(cid, ""), len(items))
         folder = folder_for(cfg.series_folders, cid, names.get(cid))
         for s in items:
@@ -640,6 +730,7 @@ def fetch_series(cfg: Config, xt: Xtream, old_catalog=None, cat_record=None):
              len(shows), len(shows) - len(todo), len(todo), round(est))
 
     started = last_log = time.time()
+    set_phase("episodes", "", 0, len(todo), round(est * 60))
     for i, s in enumerate(todo, 1):
         sid = str(s.get("series_id"))
         try:
@@ -650,6 +741,10 @@ def fetch_series(cfg: Config, xt: Xtream, old_catalog=None, cat_record=None):
             log.warning("Series %s (%s): %s", sid, s.get("name"), e)
         if i % 100 == 0:
             save()
+        if i % 10 == 0 or i == len(todo):
+            spent = time.time() - started
+            set_phase("episodes", s.get("name") or "", i, len(todo),
+                      round(spent / i * (len(todo) - i)))
         if time.time() - last_log >= 30 or i == len(todo):
             elapsed = time.time() - started
             left = elapsed / i * (len(todo) - i)
@@ -1116,6 +1211,7 @@ class StrmWriter:
             return
         try:
             t0 = time.time()
+            STATUS["strm"] = dict(STATUS["strm"] or {}, running=True, started=int(t0))
             old = self._load()
             want = {}       # relative path -> manifest value (URL, or "nfo:<hash>")
             written = removed = nfos = 0
@@ -1184,8 +1280,12 @@ class StrmWriter:
             self._save(want)
             log.info("STRM: %d files in %s, %d of them .nfo (%d written, %d removed) in %.0fs",
                      len(want), self.root, nfos, written, removed, time.time() - t0)
+            STATUS["strm"] = {"running": False, "time": int(time.time()), "files": len(want),
+                              "nfo": nfos, "written": written, "removed": removed,
+                              "seconds": round(time.time() - t0)}
         except Exception as e:
             log.error("STRM sync failed: %s", e)
+            STATUS["strm"] = {"running": False, "time": int(time.time()), "error": scrub(e)}
         finally:
             self.lock.release()
 
@@ -1239,9 +1339,130 @@ class XtreamFS(fuse.Operations):
             if self.strm:
                 self.strm.sync_in_background(self.tree, self.is_unavailable)
         self.catalog = catalog
+        self._summary = (None, None)
         threading.Thread(target=self._refresh_loop, daemon=True).start()
         threading.Thread(target=self._save_sizes_loop, daemon=True).start()
         threading.Thread(target=self._stats_loop, daemon=True).start()
+        port = int(os.environ.get("WEB_PORT", "8099") or 0)
+        if port:
+            try:
+                # webui imports this module by name; make sure it gets this same
+                # instance (with the live status and log) rather than a fresh copy.
+                sys.modules.setdefault("xtreamfs", sys.modules[__name__])
+                import webui
+                webui.start(self, port, os.environ.get("WEB_PASSWORD", ""))
+                log.info("Web page on port %d", port)
+            except Exception as e:  # the filesystem matters more than the page
+                log.error("Web page failed to start: %s", e)
+
+    # ---- web page support ------------------------------------------------
+
+    def request_refresh(self):
+        open(self.trigger_path, "w").close()
+
+    def accept_shrink(self):
+        open(self.accept_path, "w").close()
+
+    def catalog_summary(self):
+        cat = self.catalog
+        if not cat:
+            return None
+        if self._summary[0] is cat:
+            return self._summary[1]
+        counts = cat.get("counts") or {}
+        if not counts.get("movie") and not counts.get("series"):
+            counts = {"movie": dict(collections.Counter(str(m.get("category_id"))
+                                                        for m in cat.get("movies", []))),
+                      "series": dict(collections.Counter(str(s.get("category_id"))
+                                                         for s in cat.get("series", [])))}
+        summary = {
+            "fetched": cat.get("fetched"),
+            "movies": len(cat.get("movies", [])),
+            "shows": len(cat.get("series", [])),
+            "episodes": sum(episode_count(s) for s in cat.get("series", [])),
+            "movie_folders": dict(collections.Counter(m.get("_folder") or "Movies"
+                                                      for m in cat.get("movies", []))),
+            "series_folders": dict(collections.Counter(s.get("_folder") or "TV"
+                                                       for s in cat.get("series", []))),
+            "counts": counts,
+            "files": len(self.tree.files),
+        }
+        self._summary = (cat, summary)
+        return summary
+
+    def categories_view(self, live=False):
+        cat = self.catalog or {}
+        known = cat.get("categories") or {}
+        names = known
+        if live:
+            names = {}
+            for kind, action in (("movie", "get_vod_categories"),
+                                 ("series", "get_series_categories")):
+                names[kind] = {str(c["category_id"]): c.get("category_name", "")
+                               for c in (self.xt.api(action) or [])}
+        counts = (self.catalog_summary() or {}).get("counts") or {}
+        out = {}
+        for kind, wanted, exclude, folders in (
+                ("movie", self.cfg.movie_cats, self.cfg.movie_exclude, self.cfg.movie_folders),
+                ("series", self.cfg.series_cats, self.cfg.series_exclude, self.cfg.series_folders)):
+            avail = [{"category_id": i, "category_name": n}
+                     for i, n in (names.get(kind) or {}).items()]
+            included = set(resolve_categories(wanted, avail, exclude, quiet=True))
+            rows = [{"id": i, "name": n, "count": (counts.get(kind) or {}).get(i),
+                     "included": i in included, "folder": folder_for(folders, i, n) or "",
+                     "new": live and i not in (known.get(kind) or {})}
+                    for i, n in (names.get(kind) or {}).items()]
+            out[kind] = {"all": is_all(wanted), "rows": rows}
+        return out
+
+    # Settings that apply without restarting the container.
+    HOT = ("movie_cats", "series_cats", "movie_exclude", "series_exclude", "movie_folders",
+           "series_folders", "overrides", "refresh_hours", "shrink_guard", "shrink_guard_min",
+           "movie_layout", "series_layout", "strip_prefix", "api_delay", "strm_nfo",
+           "strm_nfo_lock", "unavailable_retry", "redirect_ttl")
+    # Changes to these need a fresh catalog refresh to take effect.
+    REFRESH = ("movie_cats", "series_cats", "movie_exclude", "series_exclude", "movie_folders",
+               "series_folders", "overrides", "movie_layout", "series_layout", "strip_prefix",
+               "strm_nfo", "strm_nfo_lock")
+
+    def save_settings(self, changes):
+        """Save settings from the web page and apply what can be applied now.
+        A value of None removes the setting, so .env (or the default) applies again."""
+        load_settings()
+        before = Config()
+        data = dict(SETTINGS)
+        for k, v in changes.items():
+            if k not in EDITABLE:
+                continue
+            if v is None:
+                data.pop(k, None)
+            else:
+                data[k] = str(v).strip()
+        tmp = settings_path() + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=1, sort_keys=True)
+        os.replace(tmp, settings_path())
+        load_settings()
+        new = Config()
+        changed = [a for a in vars(new) if getattr(new, a) != getattr(before, a)]
+        # Settings that only apply after a restart and differ from what's running.
+        restart = [a for a in vars(new) if a not in self.HOT
+                   and getattr(new, a) != getattr(self.cfg, a)]
+        old_hours = self.cfg.refresh_hours
+        for a in self.HOT:
+            setattr(self.cfg, a, getattr(new, a))
+        if self.cfg.refresh_hours != old_hours:
+            self.reschedule = True
+        if self.strm:
+            self.strm.nfo, self.strm.lock_nfo = new.strm_nfo, new.strm_nfo_lock
+            self.strm.strip_prefix = new.strip_prefix
+        logging.getLogger().setLevel(env("LOG_LEVEL", "INFO"))
+        refresh = any(a in self.REFRESH for a in changed)
+        if changed:
+            log.info("Settings changed from the web page: %s", ", ".join(changed))
+        if refresh:
+            self.request_refresh()
+        return {"changed": changed, "restart": restart, "refresh": refresh}
 
     # ---- persistence -----------------------------------------------------
 
@@ -1279,6 +1500,15 @@ class XtreamFS(fuse.Operations):
         trigger file (docker exec xtreamfs touch /config/refresh)."""
         end = time.time() + seconds
         while time.time() < end:
+            if getattr(self, "reschedule", False):
+                # The refresh interval changed: count it from the last refresh.
+                self.reschedule = False
+                if self.catalog and STATUS.get("next_at"):
+                    end = max(time.time(), self.catalog.get("fetched", 0)
+                              + self.cfg.refresh_hours * 3600)
+                    STATUS["next_at"] = int(end)
+                    log.info("Next refresh rescheduled for %s",
+                             time.strftime("%Y-%m-%d %H:%M", time.localtime(end)))
             if os.path.exists(self.accept_path):
                 log.info("accept-shrink found; refreshing now")
                 return
@@ -1289,7 +1519,7 @@ class XtreamFS(fuse.Operations):
                     pass
                 log.info("Manual refresh requested")
                 return
-            time.sleep(min(10, max(0, end - time.time())))
+            time.sleep(min(2, max(0, end - time.time())))
 
     def _shrink_problem(self, catalog):
         """Describe a suspicious drop in movies or shows, or return None.
@@ -1318,9 +1548,13 @@ class XtreamFS(fuse.Operations):
             delay = max(0, self.catalog.get("fetched", 0)
                         + self.cfg.refresh_hours * 3600 - time.time())
         while True:
+            set_phase("idle")
+            STATUS["next_at"] = int(time.time() + delay)
             self._wait(delay)
+            STATUS.update(started=int(time.time()), next_at=None)
             try:
                 log.info("Refreshing catalog from provider")
+                set_phase("categories")
                 catalog = fetch_catalog(self.cfg, self.xt, self.catalog)
                 problem = self._shrink_problem(catalog)
                 if problem:
@@ -1330,13 +1564,18 @@ class XtreamFS(fuse.Operations):
                         log.error("Keeping the previous catalog: %s. If the provider really "
                                   "removed these, accept it with: docker exec xtreamfs touch "
                                   "/config/accept-shrink", problem)
+                        STATUS["shrink"] = problem
+                        STATUS["last"] = {"time": int(time.time()), "result": "kept previous",
+                                          "detail": problem}
                         delay = self.cfg.refresh_hours * 3600
                         continue
+                STATUS["shrink"] = None
                 if os.path.exists(self.accept_path):
                     try:
                         os.remove(self.accept_path)
                     except OSError:
                         pass
+                set_phase("building")
                 tree, state = build_tree(catalog, self.xt,
                                          self.cfg.strip_prefix, self.state,
                                          self.cfg.overrides, self.cfg.movie_layout,
@@ -1344,14 +1583,20 @@ class XtreamFS(fuse.Operations):
                 with self.tree_lock:
                     self.tree = tree
                 self.catalog, self.state = catalog, state
+                set_phase("saving")
                 self._save_json(self.catalog_path, catalog)
                 self._save_json(self.state_path, state)
                 log.info("Catalog ready: %d files", len(tree.files))
+                STATUS["last"] = {"time": int(time.time()), "result": "ok",
+                                  "files": len(tree.files), "movies": len(catalog["movies"]),
+                                  "shows": len(catalog["series"]),
+                                  "seconds": int(time.time() - STATUS["started"])}
                 if self.strm:
                     self.strm.sync_in_background(tree, self.is_unavailable)
                 delay = self.cfg.refresh_hours * 3600
             except Exception as e:
                 log.error("Catalog refresh failed: %s (retrying in 15 min)", e)
+                STATUS["last"] = {"time": int(time.time()), "result": "failed", "detail": scrub(e)}
                 delay = 900
 
     # ---- sizes -----------------------------------------------------------
@@ -1425,6 +1670,7 @@ class XtreamFS(fuse.Operations):
             msg = self.stats.report(interval)
             if msg:
                 log.info(msg)
+                STATUS["provider"] = {"time": int(time.time()), "msg": msg}
             cutoff = time.time() - self.cfg.redirect_ttl
             for k, (_, t) in list(self.resolved.items()):
                 if t < cutoff:
@@ -1547,6 +1793,7 @@ class Redact(logging.Filter):
     def __init__(self, secrets):
         super().__init__()
         self.secrets = [s for s in secrets if s and len(s) >= 3]
+        SECRETS[:] = sorted(set(SECRETS) | set(self.secrets), key=len, reverse=True)
 
     def filter(self, record):
         msg = record.getMessage()
@@ -1557,11 +1804,17 @@ class Redact(logging.Filter):
 
 
 def main():
-    logging.basicConfig(level=env("LOG_LEVEL", "INFO"),
-                        format="%(asctime)s %(levelname)s %(message)s")
+    load_settings()
+    fmt = "%(asctime)s %(levelname)s %(message)s"
+    logging.basicConfig(level=env("LOG_LEVEL", "INFO"), format=fmt)
+    RING.setFormatter(logging.Formatter(fmt))
+    logging.getLogger().addHandler(RING)
     cfg = Config()
     for h in logging.getLogger().handlers:
         h.addFilter(Redact([cfg.user, cfg.password]))
+    if SETTINGS:
+        log.info("Settings saved from the web page override .env for: %s",
+                 ", ".join(sorted(SETTINGS)))
     if "--list-categories" in sys.argv:
         list_categories(cfg)
         return

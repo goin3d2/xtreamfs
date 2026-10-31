@@ -73,6 +73,30 @@ if xtreamfs starts after Plex. After xtreamfs restarts, restart Plex too.
 **5. Create the libraries.** Add a Movies library pointing at `/xtream/Movies`
 and a TV Shows library pointing at `/xtream/TV`.
 
+## Settings and status page
+
+xtreamfs serves a page at `http://<server>:8099` with four tabs:
+
+- **Status:** what a refresh is doing right now (reading categories,
+  downloading episode lists with a progress bar and time left, building
+  folders, writing `.strm` files), the last result, when the next refresh is
+  due, title counts per folder, provider stats and any categories the provider
+  added or removed. **Refresh now** starts a refresh; when the shrink guard
+  holds one back, the page offers to accept the smaller catalog.
+- **Categories:** every provider category with its title count, a tickbox to
+  include it and a box to give it its own folder. **Check the provider for new
+  categories** marks any new ones. **Save and refresh** applies the changes.
+- **Settings:** everything else from `.env` apart from the provider login,
+  with a note on where each value comes from.
+- **Log:** the live log, with a filter. The provider login is masked.
+
+Settings saved on the page go in `config/settings.json` and take priority over
+`.env`; **Reset** on a setting goes back to the `.env` value. Most changes
+apply straight away. The ones marked *restart* (connection limit, user agent,
+cache sizes, stats interval) need `docker compose up -d`, followed by a Plex
+restart. Set `WEB_PASSWORD` to require a password, or `WEB_PORT=0` to turn the
+page off.
+
 ## Keeping the provider happy
 
 Plex opens every new file while scanning it. With a big catalog, that's a lot
@@ -107,6 +131,8 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `MOVIE_CATEGORY_FOLDERS` | `0` | `1` puts each movie in a subfolder for its provider category: `Movies/<Category>/<Title (Year)>` |
 | `SERIES_CATEGORY_FOLDERS` | `0` | `1` does the same for shows: `TV/<Category>/<Show (Year)>`. Each category folder must then be added to the TV library separately (see below) |
 | `STRM_DIR` | (empty) | Folder that gets a `.strm` copy of the whole library, e.g. `/strm` |
+| `WEB_PORT` | `8099` | Port for the settings and status page (0 turns it off) |
+| `WEB_PASSWORD` | (empty) | Password for the page |
 | `STRM_NFO` | `0` | `1` also writes `.nfo` metadata files next to the `.strm` files |
 | `STRM_NFO_LOCK` | `0` | `1` marks those `.nfo` files locked, so the server skips online lookups for them |
 | `SHRINK_GUARD_PERCENT` | `25` | Keep the previous catalog if a refresh would remove more than this share of movies or shows (0 turns it off) |
