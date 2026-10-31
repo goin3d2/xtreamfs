@@ -43,7 +43,8 @@ docker compose run --rm xtreamfs --list-categories
 Put the IDs you want into `MOVIE_CATEGORIES` and `SERIES_CATEGORIES` in `.env`
 (for example `MOVIE_CATEGORIES=10,14,22`), or use `all` to include every
 category, including ones the provider adds later. Start small if you pick
-individual IDs. You can add more later.
+individual IDs. You can add more later, from `.env` or from the Categories tab
+of the [settings page](#settings-and-status-page).
 
 **3. Start it.**
 
@@ -53,7 +54,9 @@ docker compose logs -f
 ```
 
 The first start reads the catalog. Series take longer because each show needs
-its own API call. When you see `Catalog ready: N files`, check it from the host:
+its own API call. You can follow it on the settings page at
+`http://<server>:8099`. When you see `Catalog ready: N files`, check it from
+the host:
 
 ```bash
 ls /path/to/xtreamfs/mount/Movies | head
@@ -234,15 +237,16 @@ Three things help:
   `SERIES_EXCLUDE` (IDs or names) for anything you don't want. Titles are
   matched by their stream ID, so a title that only moved to another category
   keeps its folder and Plex sees no change.
-- **The log reports category changes** at each refresh, e.g.
+- **The log and the Status tab report category changes** at each refresh, e.g.
   `Provider removed movie categories: 798 Netflix` and
   `Provider added movie categories: 879 Action`.
 - **The shrink guard.** If a refresh would remove more than
   `SHRINK_GUARD_PERCENT` (25%) of your movies or of your shows, and you
   haven't changed your category settings, xtreamfs keeps the previous catalog
   and logs an error explaining what would have gone. If the removal is
-  genuine, accept it with `docker exec xtreamfs touch /config/accept-shrink`;
-  the next refresh starts right away and applies it.
+  genuine, accept it with **Accept the smaller catalog** on the Status tab or
+  `docker exec xtreamfs touch /config/accept-shrink`; the next refresh starts
+  right away and applies it.
 
 ## Separate folders for some categories
 
@@ -291,9 +295,10 @@ those titles.
   folder and the extra copies' episodes are labelled, e.g.
   `Show - S01E01 - 4K` and `Show - S01E01 - 4K DV`.
 - **Refreshing:** the catalog is re-read every `REFRESH_HOURS`, and right
-  away whenever you change the categories in `.env` and restart. To refresh
-  now without restarting, run `docker exec xtreamfs touch /config/refresh`.
-  It starts within about 10 seconds. Then scan the library in Plex.
+  away whenever you change the categories (on the Categories tab, or in
+  `.env` followed by a restart). To refresh now, press **Refresh now** on the
+  Status tab or run `docker exec xtreamfs touch /config/refresh`. It starts
+  within about 10 seconds. Then scan the library in Plex.
 - **Provider offline:** the last good catalog is kept in `config/catalog.json`,
   so the library stays in place, and playback works again once the provider is
   back.
