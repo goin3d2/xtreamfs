@@ -142,6 +142,7 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `MOVIE_OVERRIDES` | (empty) | Movies sent to a folder by TMDB ID |
 | `MOVIE_CATEGORY_FOLDERS` | `0` | `1` puts each movie in a subfolder for its provider category: `Movies/<Category>/<Title (Year)>` |
 | `SERIES_CATEGORY_FOLDERS` | `0` | `1` does the same for shows: `TV/<Category>/<Show (Year)>`. Each category folder must then be added to the TV library separately (see below) |
+| `MOUNT` | `1` | `0` turns the FUSE mount off and writes only the `.strm` copy (Emby/Jellyfin without Plex) |
 | `STRM_DIR` | (empty) | Folder that gets a `.strm` copy of the whole library, e.g. `/strm` |
 | `WEB_PORT` | `8099` | Port for the settings and status page (0 turns it off) |
 | `WEB_PASSWORD` | (empty) | Password for the page |
@@ -210,6 +211,22 @@ files without touching the provider, so scans are fast.
 - Emby plays from the provider directly, so its streams don't count toward
   `MAX_STREAMS`. Each file contains the provider link, including your login.
 - Media info (resolution, HDR) appears in Emby after a title is first played.
+
+## Emby or Jellyfin only (no Plex)
+
+If you don't use Plex, turn the mount off and let xtreamfs maintain just the
+`.strm` copy. The container then needs no privileged mode, no FUSE and no
+mount folder. Use `docker-compose.emby.yml` instead of `docker-compose.yml`:
+
+```bash
+docker compose -f docker-compose.emby.yml up -d
+```
+
+It sets `MOUNT=0` and maps only `config` and `strm`. Point Emby or Jellyfin
+libraries at `strm/Movies`, `strm/TV` and any folders you add. Catalog
+refreshes, folder mapping, `.nfo` files and the settings page all work as
+usual; the streaming settings (connections, cache) only apply to the mount,
+so the Settings tab leaves them out.
 
 ## Metadata files for faster Emby/Jellyfin scans
 

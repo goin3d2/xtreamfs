@@ -62,11 +62,14 @@ FIELDS = [
     ("LOG_LEVEL", "Streaming", "Log level", "choice:DEBUG,INFO,WARNING,ERROR", "INFO", ""),
 ]
 RESTART = {"MAX_STREAMS", "USER_AGENT", "CACHE_MB", "CACHE_EDGE_MB", "STATS_INTERVAL"}
+# Settings that only affect streaming through the Plex mount.
+MOUNT_ONLY = {"MAX_STREAMS", "REDIRECT_CACHE_MINUTES", "CACHE_MB", "CACHE_EDGE_MB",
+              "STATS_INTERVAL"}
 CATEGORY_KEYS = {"MOVIE_CATEGORIES", "SERIES_CATEGORIES", "MOVIE_EXCLUDE", "SERIES_EXCLUDE",
                  "MOVIE_FOLDERS", "SERIES_FOLDERS"}
 
 
-def settings_view():
+def settings_view(mount=True):
     xf.load_settings()
     out = []
     for name, group, label, kind, default, help_text in FIELDS:
@@ -76,6 +79,8 @@ def settings_view():
             value, source = os.environ[name], "env"
         else:
             value, source = default, "default"
+        if not mount and name in MOUNT_ONLY:
+            continue
         out.append({"name": name, "group": group, "label": label, "kind": kind,
                     "value": value, "source": source, "default": default,
                     "env": os.environ.get(name), "help": help_text,
@@ -156,13 +161,14 @@ def start(fs, port, password=""):
                         "unavailable": len(fs.unavailable),
                         "strm_dir": fs.cfg.strm_dir,
                         "max_streams": fs.cfg.max_streams,
+                        "mount": fs.cfg.mount_enabled,
                         "overrides_from_page": sorted(xf.SETTINGS)})
                 if u.path == "/api/log":
                     after = int((q.get("after") or ["0"])[0])
                     lines, last = xf.RING.since(after)
                     return self._send(200, {"last": last, "lines": lines})
                 if u.path == "/api/settings":
-                    return self._send(200, settings_view())
+                    return self._send(200, settings_view(fs.cfg.mount_enabled))
                 if u.path == "/api/login":
                     return self._send(200, dict(fs.login_view(), protected=bool(password)))
                 if u.path == "/api/account":

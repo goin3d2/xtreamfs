@@ -282,17 +282,17 @@ async function loadStatus(){
   let al="";
   if(s.shrink)al+=`<div class="alert bad"><b>Refresh held back.</b> ${esc(s.shrink)}. If the provider really removed these, <button class="btn danger" onclick="acceptShrink()">Accept the smaller catalog</button></div>`;
   if(s.last&&s.last.result==="waiting")al+=`<div class="alert"><b>Not set up yet.</b> ${esc(s.last.detail)} <button class="btn" onclick="goTab('${/login/.test(s.last.detail)?"account":"categories"}')">Open ${/login/.test(s.last.detail)?"Account":"Categories"}</button></div>`;
-  maxStreams=d.max_streams;
+  maxStreams=d.max_streams;mountOn=d.mount;
   if(s.last&&s.last.result==="failed")al+=`<div class="alert bad"><b>Last refresh failed</b> ${ago(s.last.time,now)}: ${esc(s.last.detail)}</div>`;
   $("#alerts").innerHTML=al;
   // cards
   const st=s.strm;
   const cards=[
     ["Shows",fmtN(c.shows),`${fmtN(c.episodes)} episodes`],
-    ["Movies",fmtN(c.movies),`${fmtN(c.files)} files in the mount`],
+    ["Movies",fmtN(c.movies),`${fmtN(c.files)} ${d.mount?"files in the mount":"video files in total"}`],
     ["Catalog",c.fetched?ago(c.fetched,now):"–",s.last&&s.last.result==="ok"?`last refresh took ${dur(s.last.seconds)}`:""],
     [".strm copy",st?(st.running?"Writing…":(st.error?"Failed":fmtN(st.files))):(d.strm_dir?"–":"Off"),st&&!st.running&&!st.error?`${fmtN(st.written)} written, ${fmtN(st.removed)} removed ${ago(st.time,now)}`:(st&&st.error?esc(st.error):"")],
-    ["Provider",s.provider?ago(s.provider.time,now):"quiet",s.provider?esc(s.provider.msg.replace(/^Provider, last \d+s: /,"")):"No streaming activity reported yet"],
+    ...(d.mount?[["Provider",s.provider?ago(s.provider.time,now):"quiet",s.provider?esc(s.provider.msg.replace(/^Provider, last \d+s: /,"")):"No streaming activity reported yet"]]:[["Mode",".strm only","The Plex mount is turned off (MOUNT=0)"]]),
     ["Refused titles",fmtN(d.unavailable),"hidden for now, checked again later"],
   ];
   $("#cards").innerHTML=cards.map(([h,b,m])=>`<div class="card"><h2>${h}</h2><div class="big">${b}</div><div class="muted" style="font-size:12px">${m}</div></div>`).join("");
@@ -399,7 +399,7 @@ $("#setsave").onclick=async()=>{
 async function resetField(name){try{await post("/api/settings",{[name]:null});toast("Back to the .env value.");loadSettings()}catch(e){toast(e.message)}}
 
 /* account */
-let maxStreams=null,acct=null;
+let maxStreams=null,mountOn=true,acct=null;
 function goTab(t){document.querySelector(`nav button[data-tab=${t}]`).click()}
 function day(t){return t?new Date(t*1000).toLocaleDateString([], {year:"numeric",month:"short",day:"numeric"}):"–"}
 async function loadAccount(fresh){
@@ -424,6 +424,7 @@ function renderAccount(a){
   const cards=[
     ["Expires",a.expires?day(a.expires):"Never",days==null?"no end date":(days<0?"expired":`${days} day${days===1?"":"s"} left`)],
     ["Connections",a.max_connections==null?"–":`${fmtN(a.active_connections??0)} of ${fmtN(a.max_connections)}`,"in use now, across all your devices"],
+    mountOn===false?["Plex mount","Off","Emby plays from the provider directly, so all connections are yours to use"]:
     ["xtreamfs uses up to",maxStreams==null?"–":fmtN(maxStreams),a.max_connections&&maxStreams?(maxStreams>=a.max_connections?"your whole plan: none left for other devices":`leaving ${a.max_connections-maxStreams} for Emby, live TV and others`):"Max provider connections, on Settings"],
   ];
   $("#acctgrid").innerHTML=cards.map(([h,b,m])=>`<div class="card"><h2>${h}</h2><div class="big">${esc(b)}</div><div class="muted" style="font-size:12px">${esc(m)}</div></div>`).join("");

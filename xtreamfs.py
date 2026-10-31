@@ -143,6 +143,9 @@ class Config:
         self.user = (env("XTREAM_USER", "") or "").strip()
         self.password = env("XTREAM_PASS", "") or ""
         self.mount = env("MOUNT_POINT", "/mnt/xtream")
+        # MOUNT=0 skips the FUSE mount (for Emby/Jellyfin only): xtreamfs then
+        # just keeps the .strm copy up to date.
+        self.mount_enabled = os.environ.get("MOUNT", "1").strip() != "0"
         self.cache_dir = env("CACHE_DIR", "/config")
         # Category IDs or names, or "all" for every category the provider has
         # (including ones it adds later). *_EXCLUDE removes categories from "all".
@@ -173,6 +176,8 @@ class Config:
         self.series_layout = "category" if env("SERIES_CATEGORY_FOLDERS", "0") == "1" else "flat"
         # Optional folder that gets a .strm copy of the whole tree (for Emby/Jellyfin).
         self.strm_dir = env("STRM_DIR", "").rstrip("/")
+        if not self.mount_enabled and not self.strm_dir:
+            self.strm_dir = "/strm"  # without the mount, the .strm copy is the only output
         # Also write .nfo metadata files next to the .strm files, from the provider's catalog.
         self.strm_nfo = env("STRM_NFO", "0") == "1"
         # Mark those .nfo files locked, so the media server leaves the titles alone.
@@ -1925,6 +1930,12 @@ def main():
     if not cfg.movie_cats and not cfg.series_cats:
         log.warning("No categories selected yet: choose them on the settings page, "
                     "or set MOVIE_CATEGORIES / SERIES_CATEGORIES")
+    if not cfg.mount_enabled:
+        log.info("Mount turned off (MOUNT=0): keeping the .strm copy in %s up to date",
+                 cfg.strm_dir)
+        XtreamFS(cfg)  # refreshes, .strm files and the web page run in background threads
+        while True:
+            time.sleep(3600)
     os.makedirs(cfg.mount, exist_ok=True)
     log.info("Mounting at %s (max %d provider connections)",
              cfg.mount, cfg.max_streams)

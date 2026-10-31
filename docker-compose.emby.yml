@@ -1,0 +1,20 @@
+# Emby / Jellyfin only: no FUSE mount, so no privileged mode or mount folder.
+# xtreamfs keeps a .strm copy of the library in ./strm up to date.
+# Start with:  docker compose -f docker-compose.emby.yml up -d
+services:
+  xtreamfs:
+    build: .
+    image: xtreamfs:local
+    container_name: xtreamfs
+    restart: unless-stopped
+    env_file: .env
+    # Settings and status page: http://<server>:8099
+    ports:
+      - "8099:8099"
+    environment:
+      TZ: America/New_York
+      MOUNT: "0"
+      STRM_DIR: /strm
+    volumes:
+      - ./config:/config
+      - ./strm:/strm
