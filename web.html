@@ -256,25 +256,30 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{tab=b.dataset.
   if(tab==="categories"&&!catData)loadCats(false);if(tab==="settings")loadSettings();if(tab==="account")loadAccount(false);if(tab==="log")scrollLog()});
 
 /* status */
-const PH={idle:"Idle",categories:"Reading categories",movies:"Movie categories",series:"Series categories",episodes:"Downloading episode lists",building:"Building folders",saving:"Saving catalog"};
+const PH={idle:"Idle",categories:"Reading categories",movies:"Movie categories",series:"Series categories",episodes:"Downloading episode lists",details:"Downloading movie details",building:"Building folders",saving:"Saving catalog"};
 async function loadStatus(){
   let d;try{d=await api("/api/status")}catch(e){$("#phasepill").textContent="offline";return}
   const s=d.status,now=d.now,c=d.catalog||{};
   const busy=s.phase!=="idle";
   const strmBusy=s.strm&&s.strm.running;
-  $("#phasepill").textContent=busy?PH[s.phase]||s.phase:(strmBusy?"Writing .strm files":"Idle");
+  const strmText=strmBusy&&s.strm.art?`Downloading artwork`:"Writing .strm files";
+  $("#phasepill").textContent=busy?PH[s.phase]||s.phase:(strmBusy?strmText:"Idle");
   $("#phasepill").classList.toggle("busy",busy||strmBusy);
-  $("#phase").textContent=busy?PH[s.phase]||s.phase:(strmBusy?"Writing .strm files":"Idle");
+  $("#phase").textContent=busy?PH[s.phase]||s.phase:(strmBusy?strmText:"Idle");
   let pct=0,detail="",meta="";
   if(busy){
-    if(s.total){pct=Math.round(s.done*100/s.total);detail=`${fmtN(s.done)} of ${fmtN(s.total)}${s.phase==="episodes"?" shows":" categories"} (${pct}%)`;}
-    if(s.detail)detail+=(detail?"<br>":"")+`<span class="muted">${s.phase==="episodes"?"Now reading: ":""}${esc(s.detail)}</span>`;
-    meta=`Started ${ago(s.started,now)}`+(s.eta!=null&&s.phase==="episodes"?`, about ${dur(s.eta)} left`:"");
+    if(s.total){pct=Math.round(s.done*100/s.total);const unit={episodes:" shows",details:" movies"}[s.phase]||" categories";detail=`${fmtN(s.done)} of ${fmtN(s.total)}${unit} (${pct}%)`;}
+    const long=s.phase==="episodes"||s.phase==="details";
+    if(s.detail)detail+=(detail?"<br>":"")+`<span class="muted">${long?"Now reading: ":""}${esc(s.detail)}</span>`;
+    meta=`Started ${ago(s.started,now)}`+(s.eta!=null&&long?`, about ${dur(s.eta)} left`:"");
+  }else if(strmBusy&&s.strm.art){
+    const a=s.strm.art;pct=Math.round(a[0]*100/a[1]);detail=`${fmtN(a[0])} of ${fmtN(a[1])} images (${pct}%)`;
+    meta=`Next scheduled refresh ${inT(s.next_at,now)} (${clock(s.next_at)})`;
   }else{
     meta=`Next scheduled refresh ${inT(s.next_at,now)} (${clock(s.next_at)})`;
     if(s.last)detail=lastText(s.last,now);
   }
-  $("#bar").style.width=(busy?(s.total?pct:4):0)+"%";
+  $("#bar").style.width=(busy?(s.total?pct:4):(strmBusy&&s.strm.art?pct:0))+"%";
   $("#strip").classList.toggle("running",busy||!!strmBusy);
   $("#phasedetail").innerHTML=detail;$("#phasemeta").textContent=meta;
   $("#refreshbtn").disabled=busy;

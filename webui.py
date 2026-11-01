@@ -47,6 +47,13 @@ FIELDS = [
      "Metadata files next to each .strm, from the provider's catalog."),
     ("STRM_NFO_LOCK", "Emby / Jellyfin", "Lock .nfo files", "bool", "0",
      "Tell the server to keep these details and skip online lookups."),
+    ("MOVIE_DETAILS", "Emby / Jellyfin", "Full movie details", "bool", "0",
+     "Ask the provider for each movie's plot, genres, cast, runtime and backdrop (one "
+     "request per film, cached) and write them into the movies' .nfo files. The first "
+     "run takes a few hours on a big catalog; later refreshes only fetch new movies."),
+    ("MOVIE_ARTWORK", "Emby / Jellyfin", "Download movie artwork", "bool", "0",
+     "Save each movie's poster and backdrop next to it (poster.jpg, fanart.jpg), so the "
+     "server doesn't download them. About 250 KB per movie. Turning it off deletes them."),
     ("MAX_STREAMS", "Streaming", "Max provider connections", "number", "1",
      "Your plan's connection limit, minus any you need for live TV."),
     ("USER_AGENT", "Streaming", "User agent", "text", "VLC/3.0.20 LibVLC/3.0.20",

@@ -149,6 +149,8 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `WEB_PASSWORD` | (empty) | Password for the page |
 | `STRM_NFO` | `0` | `1` also writes `.nfo` metadata files next to the `.strm` files |
 | `STRM_NFO_LOCK` | `0` | `1` marks those `.nfo` files locked, so the server skips online lookups for them |
+| `MOVIE_DETAILS` | `0` | `1` fetches each movie's full details from the provider (once, cached) and writes them into the movies' `.nfo` files. See [Full movie details](#full-movie-details-and-artwork) |
+| `MOVIE_ARTWORK` | `0` | `1` downloads each movie's poster and backdrop into its folder (`poster.jpg`, `fanart.jpg`) |
 | `SHRINK_GUARD_PERCENT` | `25` | Keep the previous catalog if a refresh would remove more than this share of movies or shows (0 turns it off) |
 | `MAX_STREAMS` | `1` | Most connections to the provider at once |
 | `REFRESH_HOURS` | `12` | How often to re-read the catalog |
@@ -257,8 +259,31 @@ locked and leave it alone, while your own titles keep using TMDB. To pull TMDB
 details for a locked title, unlock it in its metadata editor and refresh it.
 
 How complete the details are depends on the provider. For shows and episodes
-it's usually good. For movies the catalog only has the title, year, rating,
-TMDB ID and poster, so movies are worth leaving on TMDB.
+it's usually good. For movies the catalog list only has the title, year, rating,
+TMDB ID and poster; turn on `MOVIE_DETAILS` for the rest.
+
+### Full movie details and artwork
+
+`MOVIE_DETAILS=1` asks the provider for each movie's full record (`get_vod_info`):
+plot, genres, director, cast, release date, runtime, rating, backdrop and trailer.
+These go into the movie's `.nfo` (movies get one even with `STRM_NFO=0`).
+
+- One request per film, two at a time with `API_DELAY` between them. Copies of
+  the same film in several categories share one request.
+- Details are cached in `movie_details.json`, so the first run is the long one
+  (a few hours for 100,000 films) and later refreshes only fetch new movies.
+  On a big first run the `.strm` files are written before the details start.
+- A movie whose details fail is tried again after a week.
+
+`MOVIE_ARTWORK=1` downloads each movie's poster and backdrop next to it as
+`poster.jpg` and `fanart.jpg` (about 250 KB per movie), four at a time. Emby and
+Jellyfin use local artwork instead of downloading their own. Images are only
+downloaded once; turning the setting off deletes them.
+
+Either way the details come from the provider, which mostly copies them from
+TMDB. What it doesn't have: actor photos, age ratings, studios and collections.
+Leave the `.nfo` files unlocked and the server still fills those in from TMDB at
+its own pace; lock them and the movie scan makes no online requests at all.
 
 ## When the provider reorganizes its categories
 

@@ -49,7 +49,7 @@ EDITABLE = {
     "MOVIE_FOLDERS", "SERIES_FOLDERS", "MOVIE_OVERRIDES", "SERIES_OVERRIDES",
     "MOVIE_CATEGORY_FOLDERS", "SERIES_CATEGORY_FOLDERS", "REFRESH_HOURS",
     "SHRINK_GUARD_PERCENT", "SHRINK_GUARD_MIN", "STRIP_PREFIX", "API_DELAY",
-    "STRM_NFO", "STRM_NFO_LOCK", "UNAVAILABLE_RETRY_HOURS", "REDIRECT_CACHE_MINUTES",
+    "STRM_NFO", "STRM_NFO_LOCK", "MOVIE_DETAILS", "MOVIE_ARTWORK", "UNAVAILABLE_RETRY_HOURS", "REDIRECT_CACHE_MINUTES",
     "MAX_STREAMS", "USER_AGENT", "CACHE_MB", "CACHE_EDGE_MB", "STATS_INTERVAL",
     "LOG_LEVEL",
 }
@@ -185,6 +185,11 @@ class Config:
         self.strm_nfo = env("STRM_NFO", "0") == "1"
         # Mark those .nfo files locked, so the media server leaves the titles alone.
         self.strm_nfo_lock = env("STRM_NFO_LOCK", "0") == "1"
+        # Ask the provider for each movie's full details (plot, genres, cast, runtime,
+        # backdrop...) once, cache them, and write them into the movies' .nfo files.
+        self.movie_details = env("MOVIE_DETAILS", "0") == "1"
+        # Download each movie's poster and backdrop into its folder (poster.jpg, fanart.jpg).
+        self.movie_artwork = env("MOVIE_ARTWORK", "0") == "1"
         self.shrink_guard_min = int(env("SHRINK_GUARD_MIN", "50"))  # ignore tiny libraries
         self.max_streams = max(1, int(env("MAX_STREAMS", "1")))
         self.user_agent = env("USER_AGENT", "VLC/3.0.20 LibVLC/3.0.20")
@@ -834,6 +839,113 @@ def fetch_series(cfg: Config, xt: Xtream, old_catalog=None, cat_record=None, cou
 
 
 # --------------------------------------------------------------------------
+# Movie details (get_vod_info)
+# --------------------------------------------------------------------------
+
+# Fields kept from get_vod_info; the rest (and the stream details, which providers
+# leave empty) aren't used.
+DETAIL_FIELDS = ("movie_image", "backdrop", "genre", "plot", "cast", "director",
+                 "releasedate", "duration_secs", "rating", "youtube_trailer", "mpaa")
+DETAIL_RETRY = 7 * 86400  # retry a movie whose details failed after a week
+
+
+def details_key(m):
+    """Cache key for a movie's details: its TMDB ID, so copies of the same film in
+    several categories share one lookup, or its stream ID when it has none."""
+    t = str(tmdb_of(m) or "").strip()
+    return f"t{t}" if t.isdigit() and t != "0" else f"s{m.get('stream_id')}"
+
+
+def trim_details(info):
+    if not isinstance(info, dict):
+        return {}
+    out = {}
+    for k in DETAIL_FIELDS:
+        v = info.get(k)
+        if k == "backdrop" and not v:
+            v = info.get("backdrop_path")
+        if k == "mpaa" and not v:
+            v = info.get("mpaa_rating") or info.get("age")
+        if isinstance(v, (list, tuple)):
+            v = _first_url(v) if k in ("backdrop", "movie_image") else \
+                ", ".join(str(x).strip() for x in v if str(x).strip())
+        if v not in (None, "", 0, "0"):
+            out[k] = v
+    return out
+
+
+def fetch_movie_details(cfg: Config, catalog, cache, save, workers=2):
+    """Fill `cache` with details for every movie in the catalog that hasn't got them.
+
+    One get_vod_info call per film (copies share one), a few at a time. Movie details
+    rarely change, so each is fetched once; failures are retried after DETAIL_RETRY.
+    `save()` is called as it goes, so an interrupted run picks up where it stopped."""
+    import concurrent.futures
+    now = time.time()
+    todo, keys = {}, set()
+    for m in catalog.get("movies", []):
+        k = details_key(m)
+        keys.add(k)
+        c = cache.get(k)
+        if k in todo or (c and ("i" in c or now - c.get("t", 0) < DETAIL_RETRY)):
+            continue
+        todo[k] = m
+    # Forget films that are no longer in the catalog.
+    for k in [k for k in cache if k not in keys]:
+        del cache[k]
+    if not todo:
+        log.info("Movie details: all %d cached", len(keys))
+        return
+    rate = max(0.05, cfg.api_delay + 0.25) / workers
+    log.info("Movie details: %d of %d films need details (about %d min)",
+             len(todo), len(keys), round(len(todo) * rate / 60))
+    local = threading.local()
+
+    def one(item):
+        k, m = item
+        if not hasattr(local, "xt"):
+            local.xt = Xtream(cfg)
+        try:
+            d = local.xt.api("get_vod_info", vod_id=m.get("stream_id")) or {}
+            return k, m, {"t": int(time.time()), "i": trim_details(d.get("info") if isinstance(d, dict) else None)}
+        except Exception as e:
+            log.debug("Movie details for %s (%s): %s", m.get("stream_id"), m.get("name"), scrub(e))
+            return k, m, {"t": int(time.time()), "err": 1}
+
+    started = last_log = time.time()
+    done = failed = streak = 0
+    set_phase("details", "", 0, len(todo), round(len(todo) * rate))
+    with concurrent.futures.ThreadPoolExecutor(workers) as pool:
+        for k, m, entry in pool.map(one, list(todo.items())):
+            cache[k] = entry
+            done += 1
+            if "err" in entry:
+                failed += 1
+                streak += 1
+                if streak >= 50:
+                    log.warning("Movie details: 50 failures in a row; stopping for now "
+                                "(the rest are tried at the next refresh)")
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    break
+            else:
+                streak = 0
+            if done % 500 == 0:
+                save()
+            if done % 10 == 0 or done == len(todo):
+                spent = time.time() - started
+                set_phase("details", clean_title(m.get("name"), cfg.strip_prefix), done,
+                          len(todo), round(spent / done * (len(todo) - done)))
+            if time.time() - last_log >= 60 or done == len(todo):
+                spent = time.time() - started
+                log.info("Movie details: %d/%d (%d%%), about %d min left", done, len(todo),
+                         done * 100 // len(todo), round(spent / done * (len(todo) - done) / 60))
+                last_log = time.time()
+    save()
+    log.info("Movie details: %d fetched, %d failed (retried in %d days)",
+             done - failed, failed, DETAIL_RETRY // 86400)
+
+
+# --------------------------------------------------------------------------
 # Streaming
 # --------------------------------------------------------------------------
 
@@ -1192,16 +1304,54 @@ def _date(v):
     return v if re.match(r"\d{4}-\d{2}-\d{2}$", v) else ""
 
 
-def movie_nfo(m, strip_prefix):
+def _split(v, limit=None):
+    out = [x.strip() for x in re.split(r"\s*[,/]\s*", str(v or "")) if x.strip()]
+    return out[:limit] if limit else out
+
+
+def _trailer(v):
+    v = str(v or "").strip()
+    if re.fullmatch(r"[\w-]{6,20}", v):  # a bare YouTube video ID
+        return f"https://www.youtube.com/watch?v={v}"
+    return v if v.startswith("http") else ""
+
+
+def _img_ext(url):
+    m = re.search(r"\.(jpe?g|png|webp)(?:[?#]|$)", url, re.I)
+    return {"jpeg": "jpg"}.get(m.group(1).lower(), m.group(1).lower()) if m else "jpg"
+
+
+def movie_art(m, info=None):
+    """(poster URL, backdrop URL) for a movie, preferring its full details."""
+    info = info or {}
+    return (_first_url(info.get("movie_image")) or _first_url(m.get("stream_icon")),
+            _first_url(info.get("backdrop")))
+
+
+def movie_nfo(m, strip_prefix, info=None):
+    """A movie's .nfo. `info` is its trimmed get_vod_info details, when fetched."""
+    info = info or {}
+    released = _date(info.get("releasedate") or m.get("releaseDate"))
     title, year = split_year(clean_title(m.get("name"), strip_prefix),
-                             m.get("year") or m.get("releaseDate"))
-    poster = _first_url(m.get("stream_icon"))
-    return _nfo("movie", [
-        ("title", title), ("year", year), ("rating", _num(m.get("rating"))),
-        ("plot", m.get("plot")), ("genre", m.get("genre")),
-        *_ids(tmdb_of(m)),
-        ("_raw", f'<thumb aspect="poster">{_x(poster)}</thumb>' if poster else ""),
-    ])
+                             m.get("year") or m.get("releaseDate") or released[:4] or None)
+    secs = _num(info.get("duration_secs"))
+    poster, fanart = movie_art(m, info)
+    fields = [("title", title), ("year", year),
+              ("rating", _num(info.get("rating")) or _num(m.get("rating"))),
+              ("plot", info.get("plot") or m.get("plot")),
+              ("runtime", int(secs // 60) if secs and secs >= 60 else None),
+              ("premiered", released), ("mpaa", info.get("mpaa"))]
+    fields += [("genre", g) for g in _split(info.get("genre") or m.get("genre"))]
+    fields += [("director", d) for d in _split(info.get("director"))]
+    fields += _ids(tmdb_of(m))
+    if poster:
+        fields.append(("_raw", f'<thumb aspect="poster">{_x(poster)}</thumb>'))
+    if fanart:
+        fields.append(("_raw", f"<fanart><thumb>{_x(fanart)}</thumb></fanart>"))
+    for name in _split(info.get("cast"), 20):
+        fields.append(("_raw", f"<actor><name>{_x(name)}</name></actor>"))
+    fields.append(("trailer", _trailer(info.get("youtube_trailer"))))
+    return _nfo("movie", fields)
 
 
 def show_nfo(s, strip_prefix):
@@ -1257,11 +1407,16 @@ class StrmWriter:
     see unchanged titles as modified.
     """
 
-    def __init__(self, root, cache_dir, nfo=False, strip_prefix=True, lock=False):
+    def __init__(self, root, cache_dir, nfo=False, strip_prefix=True, lock=False,
+                 details=None, movie_details=False, artwork=False, user_agent=None):
         self.root = root
         self.nfo = nfo
         self.lock_nfo = lock
         self.strip_prefix = strip_prefix
+        self.details = details if details is not None else {}  # details_key -> cache entry
+        self.movie_details = movie_details  # use full details (and write movie .nfo files)
+        self.artwork = artwork              # download poster.jpg / fanart.jpg per movie
+        self.user_agent = user_agent
         self.manifest_path = os.path.join(cache_dir, "strm_manifest.json")
         self.lock = threading.Lock()
 
@@ -1314,16 +1469,30 @@ class StrmWriter:
                 put(rel, text, "nfo:" + hashlib.sha1(text.encode()).hexdigest()[:16], mtime)
 
             shows_done = set()
+            art = {}  # movie folder -> {file name: (URL, mtime)}
             for path, e in tree.files.items():
                 if skip(e):
                     continue
                 base = os.path.splitext(path.lstrip("/"))[0]
                 put(base + ".strm", e.url + "\n", e.url, e.mtime)
-                if not self.nfo or not e.meta:
+                if not e.meta:
+                    continue
+                movie = e.meta[0] == "m"
+                if not (self.nfo or (movie and (self.movie_details or self.artwork))):
                     continue
                 try:
-                    if e.meta[0] == "m":
-                        put_nfo(base + ".nfo", movie_nfo(e.meta[1], self.strip_prefix), e.mtime)
+                    if movie:
+                        m = e.meta[1]
+                        info = ((self.details.get(details_key(m)) or {}).get("i")
+                                if self.movie_details else None)
+                        if self.nfo or self.movie_details:
+                            put_nfo(base + ".nfo", movie_nfo(m, self.strip_prefix, info), e.mtime)
+                        folder = os.path.dirname(base)
+                        if self.artwork and folder and folder not in art:
+                            art[folder] = {}
+                            for name, url in zip(("poster", "fanart"), movie_art(m, info)):
+                                if url:
+                                    art[folder][f"{name}.{_img_ext(url)}"] = (url, e.mtime)
                     else:
                         ep, show = e.meta[1], e.meta[2]
                         m = re.search(r"S(\d+)E(\d+)", os.path.basename(base))
@@ -1336,6 +1505,19 @@ class StrmWriter:
                                     show_nfo(show, self.strip_prefix), e.mtime)
                 except Exception as err:  # one odd catalog record shouldn't stop the sync
                     log.debug("NFO for %s skipped: %s", path, err)
+            # Artwork already on disk is kept; new or changed images are downloaded below.
+            # An image waiting to be replaced keeps its old file (and entry) until then.
+            downloads = []
+            for folder, files in art.items():
+                for name, (url, mtime) in files.items():
+                    rel = os.path.join(folder, name)
+                    tag = "img:" + url
+                    if old.get(rel) == tag and os.path.exists(os.path.join(self.root, rel)):
+                        want[rel] = tag
+                    else:
+                        if rel in old:
+                            want[rel] = old[rel]
+                        downloads.append((rel, url, mtime))
             for rel in old:
                 if rel not in want:
                     try:
@@ -1353,14 +1535,62 @@ class StrmWriter:
             self._save(want)
             log.info("STRM: %d files in %s, %d of them .nfo (%d written, %d removed) in %.0fs",
                      len(want), self.root, nfos, written, removed, time.time() - t0)
+            images = self._download_art(downloads, want) if downloads else 0
             STATUS["strm"] = {"running": False, "time": int(time.time()), "files": len(want),
-                              "nfo": nfos, "written": written, "removed": removed,
-                              "seconds": round(time.time() - t0)}
+                              "nfo": nfos, "written": written + images, "removed": removed,
+                              "images": images, "seconds": round(time.time() - t0)}
         except Exception as e:
             log.error("STRM sync failed: %s", e)
             STATUS["strm"] = {"running": False, "time": int(time.time()), "error": scrub(e)}
         finally:
             self.lock.release()
+
+    def _download_art(self, jobs, want, workers=4):
+        """Download movie posters and backdrops. Returns how many were saved."""
+        import concurrent.futures
+        local = threading.local()
+        log.info("Artwork: downloading %d images", len(jobs))
+        t0 = time.time()
+
+        def one(job):
+            rel, url, mtime = job
+            if not hasattr(local, "s"):
+                local.s = requests.Session()
+                if self.user_agent:
+                    local.s.headers["User-Agent"] = self.user_agent
+            try:
+                r = local.s.get(url, timeout=30)
+                if r.status_code != 200 or len(r.content) < 1000 or \
+                        not r.headers.get("Content-Type", "image").startswith("image"):
+                    return rel, url, False
+                full = os.path.join(self.root, rel)
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                tmp = full + ".tmp"
+                with open(tmp, "wb") as f:
+                    f.write(r.content)
+                os.utime(tmp, (mtime, mtime))
+                os.replace(tmp, full)
+                return rel, url, True
+            except Exception as e:
+                log.debug("Artwork %s: %s", rel, e)
+                return rel, url, False
+
+        saved = failed = 0
+        with concurrent.futures.ThreadPoolExecutor(workers) as pool:
+            for i, (rel, url, ok) in enumerate(pool.map(one, jobs), 1):
+                if ok:
+                    want[rel] = "img:" + url
+                    saved += 1
+                else:
+                    failed += 1
+                if i % 500 == 0 or i == len(jobs):
+                    STATUS["strm"] = dict(STATUS["strm"] or {}, art=[i, len(jobs)])
+                    self._save(want)
+                if i % 5000 == 0:
+                    log.info("Artwork: %d/%d", i, len(jobs))
+        log.info("Artwork: %d saved, %d failed (tried again next sync) in %.0fs",
+                 saved, failed, time.time() - t0)
+        return saved
 
     def sync_in_background(self, tree, skip):
         threading.Thread(target=self.sync, args=(tree, skip), daemon=True).start()
@@ -1398,8 +1628,11 @@ class XtreamFS(fuse.Operations):
         self.size_lock = threading.Lock()
         self.sizes_dirty = False
 
+        self.details_path = os.path.join(cfg.cache_dir, "movie_details.json")
+        self.details = self._load_json(self.details_path, {})
         self.strm = (StrmWriter(cfg.strm_dir, cfg.cache_dir, cfg.strm_nfo, cfg.strip_prefix,
-                                cfg.strm_nfo_lock) if cfg.strm_dir else None)
+                                cfg.strm_nfo_lock, self.details, cfg.movie_details,
+                                cfg.movie_artwork, cfg.user_agent) if cfg.strm_dir else None)
         self.state_path = os.path.join(cfg.cache_dir, "state.json")
         self.state = self._load_json(self.state_path, {})
         catalog = self._load_json(self.catalog_path, None)
@@ -1578,11 +1811,11 @@ class XtreamFS(fuse.Operations):
     HOT = ("movie_cats", "series_cats", "movie_exclude", "series_exclude", "movie_folders",
            "series_folders", "overrides", "refresh_hours", "shrink_guard", "shrink_guard_min",
            "movie_layout", "series_layout", "strip_prefix", "api_delay", "strm_nfo",
-           "strm_nfo_lock", "unavailable_retry", "redirect_ttl")
+           "strm_nfo_lock", "movie_details", "movie_artwork", "unavailable_retry", "redirect_ttl")
     # Changes to these need a fresh catalog refresh to take effect.
     REFRESH = ("movie_cats", "series_cats", "movie_exclude", "series_exclude", "movie_folders",
                "series_folders", "overrides", "movie_layout", "series_layout", "strip_prefix",
-               "strm_nfo", "strm_nfo_lock")
+               "strm_nfo", "strm_nfo_lock", "movie_details", "movie_artwork")
 
     def save_settings(self, changes):
         """Save settings from the web page and apply what can be applied now.
@@ -1615,6 +1848,7 @@ class XtreamFS(fuse.Operations):
             self.reschedule = True
         if self.strm:
             self.strm.nfo, self.strm.lock_nfo = new.strm_nfo, new.strm_nfo_lock
+            self.strm.movie_details, self.strm.artwork = new.movie_details, new.movie_artwork
             self.strm.strip_prefix = new.strip_prefix
         logging.getLogger().setLevel(env("LOG_LEVEL", "INFO"))
         refresh = any(a in self.REFRESH for a in changed)
@@ -1697,6 +1931,19 @@ class XtreamFS(fuse.Operations):
                 return
             time.sleep(min(2, max(0, end - time.time())))
 
+    def _fetch_details(self, catalog, tree):
+        """Fetch movie details the cache is missing. On a big first run the .strm files
+        are written first, so the library isn't held up for hours."""
+        pending = sum(1 for m in catalog["movies"] if details_key(m) not in self.details)
+        if self.strm and pending > 500:
+            self.strm.sync(tree, self.is_unavailable)
+        try:
+            fetch_movie_details(self.cfg, catalog, self.details,
+                                lambda: self._save_json(self.details_path, self.details))
+        except Exception as e:  # details are extra; the catalog itself is fine
+            log.error("Movie details stopped: %s", scrub(e))
+            self._save_json(self.details_path, self.details)
+
     def _shrink_problem(self, catalog):
         """Describe a suspicious drop in movies or shows, or return None.
 
@@ -1776,6 +2023,8 @@ class XtreamFS(fuse.Operations):
                                   "files": len(tree.files), "movies": len(catalog["movies"]),
                                   "shows": len(catalog["series"]),
                                   "seconds": int(time.time() - STATUS["started"])}
+                if self.cfg.movie_details and catalog.get("movies"):
+                    self._fetch_details(catalog, tree)
                 if self.strm:
                     self.strm.sync_in_background(tree, self.is_unavailable)
                 delay = self.cfg.refresh_hours * 3600
