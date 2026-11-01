@@ -1417,6 +1417,7 @@ class StrmWriter:
         self.movie_details = movie_details  # use full details (and write movie .nfo files)
         self.artwork = artwork              # download poster.jpg / fanart.jpg per movie
         self.user_agent = user_agent
+        self._again = None  # a sync requested while one was running
         self.manifest_path = os.path.join(cache_dir, "strm_manifest.json")
         self.lock = threading.Lock()
 
@@ -1435,7 +1436,10 @@ class StrmWriter:
 
     def sync(self, tree, skip=lambda entry: False):
         if not self.lock.acquire(blocking=False):
-            log.info("STRM: a sync is already running; skipping this one")
+            # Run it again with the newest tree once the current sync (which may be
+            # downloading artwork for a while) finishes, so no update is lost.
+            self._again = (tree, skip)
+            log.info("STRM: a sync is already running; this one runs when it finishes")
             return
         try:
             t0 = time.time()
@@ -1544,6 +1548,9 @@ class StrmWriter:
             STATUS["strm"] = {"running": False, "time": int(time.time()), "error": scrub(e)}
         finally:
             self.lock.release()
+            again, self._again = self._again, None
+            if again:
+                self.sync_in_background(*again)
 
     def _download_art(self, jobs, want, workers=4):
         """Download movie posters and backdrops. Returns how many were saved."""
@@ -1576,6 +1583,7 @@ class StrmWriter:
                 return rel, url, False
 
         saved = failed = 0
+        last_log = t0
         with concurrent.futures.ThreadPoolExecutor(workers) as pool:
             for i, (rel, url, ok) in enumerate(pool.map(one, jobs), 1):
                 if ok:
@@ -1586,8 +1594,11 @@ class StrmWriter:
                 if i % 500 == 0 or i == len(jobs):
                     STATUS["strm"] = dict(STATUS["strm"] or {}, art=[i, len(jobs)])
                     self._save(want)
-                if i % 5000 == 0:
-                    log.info("Artwork: %d/%d", i, len(jobs))
+                if time.time() - last_log >= 60:
+                    spent = time.time() - t0
+                    log.info("Artwork: %d/%d (%d%%), about %d min left", i, len(jobs),
+                             i * 100 // len(jobs), round(spent / i * (len(jobs) - i) / 60))
+                    last_log = time.time()
         log.info("Artwork: %d saved, %d failed (tried again next sync) in %.0fs",
                  saved, failed, time.time() - t0)
         return saved
