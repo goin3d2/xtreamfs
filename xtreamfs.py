@@ -1434,7 +1434,9 @@ class StrmWriter:
             json.dump(manifest, f)
         os.replace(tmp, self.manifest_path)
 
-    def sync(self, tree, skip=lambda entry: False):
+    def sync(self, tree, skip=lambda entry: False, download=True):
+        """Bring the folder in line with `tree`. download=False writes the .strm and .nfo
+        files but leaves artwork downloads for a later sync."""
         if not self.lock.acquire(blocking=False):
             # Run it again with the newest tree once the current sync (which may be
             # downloading artwork for a while) finishes, so no update is lost.
@@ -1539,7 +1541,7 @@ class StrmWriter:
             self._save(want)
             log.info("STRM: %d files in %s, %d of them .nfo (%d written, %d removed) in %.0fs",
                      len(want), self.root, nfos, written, removed, time.time() - t0)
-            images = self._download_art(downloads, want) if downloads else 0
+            images = self._download_art(downloads, want) if downloads and download else 0
             STATUS["strm"] = {"running": False, "time": int(time.time()), "files": len(want),
                               "nfo": nfos, "written": written + images, "removed": removed,
                               "images": images, "seconds": round(time.time() - t0)}
@@ -1947,7 +1949,7 @@ class XtreamFS(fuse.Operations):
         are written first, so the library isn't held up for hours."""
         pending = sum(1 for m in catalog["movies"] if details_key(m) not in self.details)
         if self.strm and pending > 500:
-            self.strm.sync(tree, self.is_unavailable)
+            self.strm.sync(tree, self.is_unavailable, download=False)
         try:
             fetch_movie_details(self.cfg, catalog, self.details,
                                 lambda: self._save_json(self.details_path, self.details))
