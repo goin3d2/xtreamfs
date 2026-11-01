@@ -176,6 +176,9 @@ class Config:
         self.series_layout = "category" if env("SERIES_CATEGORY_FOLDERS", "0") == "1" else "flat"
         # Optional folder that gets a .strm copy of the whole tree (for Emby/Jellyfin).
         self.strm_dir = env("STRM_DIR", "").rstrip("/")
+        # The .strm folder as the media server sees it, written into categories.json so
+        # Emby Collections can match titles by path. Defaults to STRM_DIR.
+        self.index_root = env("EMBY_STRM_PATH", "").rstrip("/")
         if not self.mount_enabled and not self.strm_dir:
             self.strm_dir = "/strm"  # without the mount, the .strm copy is the only output
         # Also write .nfo metadata files next to the .strm files, from the provider's catalog.
@@ -644,6 +647,56 @@ def catalog_key(cfg: Config):
             "series_folders": cfg.series_folders}
 
 
+def add_cat(item, cid):
+    """Record another category a title is listed in (titles can be in several)."""
+    cats = item.setdefault("_cats", [])
+    if cid not in cats:
+        cats.append(cid)
+
+
+def item_cats(item):
+    """Every category of a title; catalogs from older versions only kept the first."""
+    cats = item.get("_cats")
+    if not cats:
+        first = item.get("_cat") or item.get("category_id")
+        cats = [first] if first not in (None, "") else []
+    return [str(c) for c in cats]
+
+
+def category_index(catalog, state, root):
+    """categories.json: which provider categories each title is in, by the path the
+    media server sees and by TMDB ID. Read by Emby Collections. Movie paths are the
+    .strm file, series paths the show folder. Same format as xtreamfs-emby writes."""
+    root = (root or "").rstrip("/")
+    paths = state.get("paths", {})
+    names = catalog.get("categories") or {}
+
+    def build(items, kind, prefix, path_of):
+        out, done = {}, set()
+        for it in items:
+            rel = paths.get(f"{prefix}{it.get(id_key[kind])}")
+            if not rel:
+                continue
+            path = root + "/" + path_of(rel).lstrip("/")
+            tmdb = str(tmdb_of(it) or "").strip()
+            for cid in item_cats(it):
+                if (cid, path) in done:  # merged copies of a show share a folder
+                    continue
+                done.add((cid, path))
+                entry = out.setdefault(cid, {"name": (names.get(kind) or {}).get(cid, cid), "items": []})
+                row = {"path": path}
+                if tmdb.isdigit() and tmdb != "0":
+                    row["tmdb"] = tmdb
+                entry["items"].append(row)
+        return out
+
+    id_key = {"movie": "stream_id", "series": "series_id"}
+    return {"version": 1, "updated": int(time.time()), "root": root,
+            "movies": build(catalog.get("movies") or [], "movie", "m",
+                            lambda rel: os.path.splitext(rel)[0] + ".strm"),
+            "series": build(catalog.get("series") or [], "series", "s", lambda rel: rel)}
+
+
 def fetch_catalog(cfg: Config, xt: Xtream, old_catalog=None):
     """Pull the selected categories from the provider."""
     catalog = {"movies": [], "series": [], "fetched": int(time.time()),
@@ -669,9 +722,12 @@ def fetch_catalog(cfg: Config, xt: Xtream, old_catalog=None):
                 if sid not in movies:
                     m["_folder"] = folder or "Movies"
                     m["_cat"] = cid  # the category list it was found in
+                    m["_cats"] = [cid]  # every category it is listed in
                     movies[sid] = m
-                elif folder:  # a category with its own folder wins
-                    movies[sid]["_folder"] = folder
+                else:
+                    if folder:  # a category with its own folder wins
+                        movies[sid]["_folder"] = folder
+                    add_cat(movies[sid], cid)
         catalog["movies"] = list(movies.values())
 
     if cfg.series_cats:
@@ -729,10 +785,13 @@ def fetch_series(cfg: Config, xt: Xtream, old_catalog=None, cat_record=None, cou
             if sid not in seen:
                 seen.add(sid)
                 s["_folder"] = folder or "TV"
+                s["_cats"] = [cid]
                 by_id[sid] = s
                 shows.append(s)
-            elif folder:  # a category with its own folder wins
-                by_id[sid]["_folder"] = folder
+            else:
+                if folder:  # a category with its own folder wins
+                    by_id[sid]["_folder"] = folder
+                add_cat(by_id[sid], cid)
 
     def fresh(s):
         c = cache.get(str(s.get("series_id")))
@@ -1350,6 +1409,7 @@ class XtreamFS(fuse.Operations):
                                                cfg.overrides, cfg.movie_layout,
                                                cfg.series_layout)
             log.info("Loaded cached catalog: %d files", len(self.tree.files))
+            self._write_category_index(catalog, self.state)
             if self.strm:
                 self.strm.sync_in_background(self.tree, self.is_unavailable)
         self.catalog = catalog
@@ -1581,6 +1641,16 @@ class XtreamFS(fuse.Operations):
             json.dump(data, f)
         os.replace(tmp, path)
 
+    def _write_category_index(self, catalog, state):
+        root = self.cfg.index_root or self.cfg.strm_dir
+        if not root:
+            return  # no .strm copy, so no paths a media server could match
+        try:
+            self._save_json(os.path.join(self.cfg.cache_dir, "categories.json"),
+                            category_index(catalog, state, root))
+        except Exception as e:
+            log.warning("categories.json not written: %s", e)
+
     def _save_sizes_loop(self):
         while True:
             time.sleep(30)
@@ -1694,6 +1764,7 @@ class XtreamFS(fuse.Operations):
                 set_phase("saving")
                 self._save_json(self.catalog_path, catalog)
                 self._save_json(self.state_path, state)
+                self._write_category_index(catalog, state)
                 log.info("Catalog ready: %d files", len(tree.files))
                 STATUS["last"] = {"time": int(time.time()), "result": "ok",
                                   "files": len(tree.files), "movies": len(catalog["movies"]),
