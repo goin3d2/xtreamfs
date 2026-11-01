@@ -144,7 +144,7 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `SERIES_CATEGORY_FOLDERS` | `0` | `1` does the same for shows: `TV/<Category>/<Show (Year)>`. Each category folder must then be added to the TV library separately (see below) |
 | `MOUNT` | `1` | `0` turns the FUSE mount off and writes only the `.strm` copy (Emby/Jellyfin without Plex) |
 | `STRM_DIR` | (empty) | Folder that gets a `.strm` copy of the whole library, e.g. `/strm` |
-| `EMBY_STRM_PATH` | `STRM_DIR` | The `.strm` folder as Emby sees it, used for paths in `config/categories.json` (see below) |
+| `EMBY_STRM_PATH` | `STRM_DIR` | The `.strm` folder as Emby sees it, used for paths in `categories.json` (see below) |
 | `WEB_PORT` | `8099` | Port for the settings and status page (0 turns it off) |
 | `WEB_PASSWORD` | (empty) | Password for the page |
 | `STRM_NFO` | `0` | `1` also writes `.nfo` metadata files next to the `.strm` files |
@@ -231,9 +231,9 @@ so the Settings tab leaves them out.
 
 ## Collections from provider categories
 
-With `STRM_DIR` set, every catalog refresh also writes `config/categories.json`. It lists each provider category and the titles in it, by `.strm` path and TMDB ID. A title listed in several categories appears in all of them. The [Emby Collections](https://github.com/goin3d2/EmbyCollections) plugin reads this file to build Emby collections from provider categories.
+With `STRM_DIR` set, every catalog refresh also writes `categories.json` to `config/` and to the top of the `strm` folder. It lists each provider category and the titles in it, by `.strm` path and TMDB ID. A title listed in several categories appears in all of them. The [Emby Collections](https://github.com/goin3d2/EmbyCollections) plugin reads this file to build Emby collections from provider categories.
 
-- In Emby Collections, set **xtreamfs data folder** to wherever Emby sees this container's `config` folder.
+- In Emby Collections, set **xtreamfs data folder** to wherever Emby sees the `strm` folder (for example `/vod`), or its `config` folder if Emby maps that too.
 - If Emby sees the `strm` folder at a different path than the container does (it usually does), set `EMBY_STRM_PATH` to Emby's path, for example `/mnt/xtreamfs/strm`. Titles are matched by exact path first, so this has to be right.
 
 ## Metadata files for faster Emby/Jellyfin scans

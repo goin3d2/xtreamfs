@@ -1646,8 +1646,14 @@ class XtreamFS(fuse.Operations):
         if not root:
             return  # no .strm copy, so no paths a media server could match
         try:
-            self._save_json(os.path.join(self.cfg.cache_dir, "categories.json"),
-                            category_index(catalog, state, root))
+            index = category_index(catalog, state, root)
+            self._save_json(os.path.join(self.cfg.cache_dir, "categories.json"), index)
+            if self.cfg.strm_dir:
+                # A copy at the top of the .strm folder, so a media server that only maps
+                # that folder can read it (e.g. /vod/categories.json). Libraries point at
+                # the subfolders, so it isn't scanned as media.
+                os.makedirs(self.cfg.strm_dir, exist_ok=True)
+                self._save_json(os.path.join(self.cfg.strm_dir, "categories.json"), index)
         except Exception as e:
             log.warning("categories.json not written: %s", e)
 
