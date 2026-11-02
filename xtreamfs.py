@@ -190,6 +190,12 @@ class Config:
         self.movie_details = env("MOVIE_DETAILS", "0") == "1"
         # Download each movie's poster and backdrop into its folder (poster.jpg, fanart.jpg).
         self.movie_artwork = env("MOVIE_ARTWORK", "0") == "1"
+        # Put each show's theme song (theme.mp3, from Plex's theme server) in its .strm folder,
+        # so Emby/Jellyfin play it while browsing. Needs a TMDB key to find TVDB ids.
+        self.series_themes = env("SERIES_THEMES", "0") == "1"
+        self.tmdb_key = (env("TMDB_API_KEY", "") or "").strip()
+        self.theme_lookups = max(0, int(env("THEME_LOOKUPS", "500")))
+        self.theme_retry_days = max(1.0, float(env("THEME_RETRY_DAYS", "30")))
         self.shrink_guard_min = int(env("SHRINK_GUARD_MIN", "50"))  # ignore tiny libraries
         self.max_streams = max(1, int(env("MAX_STREAMS", "1")))
         self.user_agent = env("USER_AGENT", "VLC/3.0.20 LibVLC/3.0.20")
@@ -1397,6 +1403,181 @@ def episode_nfo(ep, season, num):
     ])
 
 
+class ThemeFinder:
+    """Finds TV theme songs for shows and writes them as theme.mp3 in the .strm folder.
+
+    Themes come from Plex's theme server, which has one MP3 per TVDB series id. The
+    catalog only carries TMDB ids, so each show's TVDB id is looked up on TMDB once.
+    Results are kept in themes.json: a show whose theme was found isn't asked about
+    again, and one with no theme (or no TVDB id) is asked again after THEME_RETRY_DAYS.
+    Each sync looks up at most THEME_LOOKUPS shows, so a big catalog is covered over
+    several syncs instead of all at once.
+    """
+
+    PLEX = "http://tvthemes.plexapp.com/{}.mp3"
+    TMDB = "https://api.themoviedb.org/3/tv/{}/external_ids"
+    MIN_BYTES = 16 * 1024
+    MAX_BYTES = 25 * 1024 * 1024
+    FAILED_RETRY = 12 * 3600
+
+    def __init__(self, cfg):
+        self.key = cfg.tmdb_key
+        self.limit = cfg.theme_lookups
+        self.retry = cfg.theme_retry_days * 86400
+        self.path = os.path.join(cfg.cache_dir, "themes.json")
+        self.s = requests.Session()
+        self.s.headers["User-Agent"] = "xtreamfs"
+        self.lock = threading.Lock()
+        try:
+            with open(self.path) as f:
+                self.state = json.load(f)  # TMDB id -> {"v": TVDB id, "s": status, "t": checked}
+        except (OSError, ValueError):
+            self.state = {}
+        self.last = {}
+        if not self.key:
+            log.warning("Themes: SERIES_THEMES is on but TMDB_API_KEY is empty; "
+                        "no TVDB ids can be found, so no themes will be added")
+
+    def save(self):
+        with self.lock:
+            tmp = self.path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(self.state, f)
+            os.replace(tmp, self.path)
+
+    def _due(self, st, now):
+        if not st:
+            return True
+        age = now - st.get("t", 0)
+        if st.get("s") == "found":
+            return False
+        if st.get("s") == "error":
+            return age >= self.FAILED_RETRY
+        return age >= self.retry  # "none" or "noid"
+
+    def plan(self, shows, old, want, root):
+        """Keep themes already on disk, and list shows to fetch this sync (up to the limit).
+        Fills in `want` for kept files so the sync doesn't delete them."""
+        now = time.time()
+        jobs, lookups = [], 0
+        for show_dir, (tmdb, mtime) in shows.items():
+            rel = os.path.join(show_dir, "theme.mp3")
+            st = self.state.get(tmdb) if tmdb else None
+            have = (old.get(rel) or "").startswith("theme:") and os.path.exists(os.path.join(root, rel))
+            if have and st and st.get("s") == "found" and old[rel] == "theme:" + st.get("v", ""):
+                want[rel] = old[rel]
+                continue
+            if have:
+                want[rel] = old[rel]  # keep it until a replacement is downloaded
+            if not tmdb or not tmdb.isdigit():
+                continue
+            if st and st.get("s") == "found" and st.get("v"):
+                jobs.append((rel, tmdb, mtime))  # known theme, file missing: just download it
+                continue
+            if not self.key and not (st and st.get("v")):
+                continue
+            if lookups < self.limit and self._due(st, now):
+                lookups += 1
+                jobs.append((rel, tmdb, mtime))
+        return jobs
+
+    def _tvdb(self, tmdb):
+        url = self.TMDB.format(tmdb)
+        headers, params = {}, {}
+        if len(self.key) > 40:  # a v4 read access token
+            headers["Authorization"] = "Bearer " + self.key
+        else:
+            params["api_key"] = self.key
+        for attempt in range(3):
+            r = self.s.get(url, params=params, headers=headers, timeout=20)
+            if r.status_code == 429:
+                time.sleep(2 * (attempt + 1))
+                continue
+            if r.status_code == 404:
+                return None
+            if r.status_code == 401:
+                raise PermissionError("TMDB rejected TMDB_API_KEY (HTTP 401)")
+            r.raise_for_status()
+            v = r.json().get("tvdb_id")
+            return str(v) if v else None
+        raise IOError("TMDB rate limit")
+
+    @classmethod
+    def _is_mp3(cls, data):
+        if not cls.MIN_BYTES <= len(data) <= cls.MAX_BYTES:
+            return False
+        if data[:3] == b"ID3":
+            return True
+        b1 = data[1]
+        return data[0] == 0xFF and (b1 & 0xE0) == 0xE0 and (b1 & 0x18) != 0x08 and (b1 & 0x06) != 0
+
+    def fetch(self, jobs, want, root, save_manifest):
+        """Look up and download themes for `jobs`. Returns how many files were written."""
+        t0 = time.time()
+        counts = collections.Counter()
+        tmdb_ok = bool(self.key)
+        log.info("Themes: checking %d shows", len(jobs))
+        for i, (rel, tmdb, mtime) in enumerate(jobs, 1):
+            st = dict(self.state.get(tmdb) or {})
+            try:
+                tvdb = st.get("v")
+                if not tvdb:
+                    if not tmdb_ok:
+                        continue
+                    tvdb = self._tvdb(tmdb)
+                    if not tvdb:
+                        st.update(s="noid", t=time.time())
+                        counts["noid"] += 1
+                        continue
+                    st["v"] = tvdb
+                r = self.s.get(self.PLEX.format(tvdb), timeout=30)
+                if r.status_code in (404, 410):
+                    st.update(s="none", t=time.time())
+                    counts["none"] += 1
+                    continue
+                if r.status_code != 200 or not self._is_mp3(r.content):
+                    st.update(s="error", t=time.time())
+                    counts["error"] += 1
+                    continue
+                full = os.path.join(root, rel)
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                tmp = full + ".tmp"
+                with open(tmp, "wb") as f:
+                    f.write(r.content)
+                os.utime(tmp, (mtime, mtime))
+                os.replace(tmp, full)
+                want[rel] = "theme:" + tvdb
+                st.update(s="found", t=time.time())
+                counts["found"] += 1
+            except PermissionError as e:
+                log.error("Themes: %s; skipping TMDB lookups this sync", e)
+                tmdb_ok = False
+            except Exception as e:
+                log.debug("Themes: %s: %s", rel, e)
+                st.update(s="error", t=time.time())
+                counts["error"] += 1
+            finally:
+                if st:
+                    with self.lock:
+                        self.state[tmdb] = st
+                if i % 100 == 0 or i == len(jobs):
+                    STATUS["strm"] = dict(STATUS["strm"] or {}, themes_progress=[i, len(jobs)])
+                    self.save()
+                    save_manifest(want)
+                time.sleep(0.25)
+        self.save()
+        save_manifest(want)
+        self.last = dict(counts, time=int(time.time()), checked=len(jobs))
+        log.info("Themes: %d saved, %d not on Plex, %d without a TVDB id, %d failed in %.0fs",
+                 counts["found"], counts["none"], counts["noid"], counts["error"], time.time() - t0)
+        return counts["found"]
+
+    def summary(self):
+        c = collections.Counter(v.get("s") for v in self.state.values())
+        return {"found": c["found"], "none": c["none"], "noid": c["noid"], "error": c["error"],
+                "known": len(self.state), "last": self.last}
+
+
 class StrmWriter:
     """Keeps a folder of .strm files in step with the tree.
 
@@ -1408,7 +1589,7 @@ class StrmWriter:
     """
 
     def __init__(self, root, cache_dir, nfo=False, strip_prefix=True, lock=False,
-                 details=None, movie_details=False, artwork=False, user_agent=None):
+                 details=None, movie_details=False, artwork=False, user_agent=None, themes=None):
         self.root = root
         self.nfo = nfo
         self.lock_nfo = lock
@@ -1417,6 +1598,7 @@ class StrmWriter:
         self.movie_details = movie_details  # use full details (and write movie .nfo files)
         self.artwork = artwork              # download poster.jpg / fanart.jpg per movie
         self.user_agent = user_agent
+        self.themes = themes                # ThemeFinder, or None when SERIES_THEMES is off
         self._again = None  # a sync requested while one was running
         self.manifest_path = os.path.join(cache_dir, "strm_manifest.json")
         self.lock = threading.Lock()
@@ -1475,6 +1657,7 @@ class StrmWriter:
                 put(rel, text, "nfo:" + hashlib.sha1(text.encode()).hexdigest()[:16], mtime)
 
             shows_done = set()
+            shows = {}  # show folder -> (TMDB id, mtime), for theme songs
             art = {}  # movie folder -> {file name: (URL, mtime)}
             for path, e in tree.files.items():
                 if skip(e):
@@ -1483,6 +1666,10 @@ class StrmWriter:
                 put(base + ".strm", e.url + "\n", e.url, e.mtime)
                 if not e.meta:
                     continue
+                if self.themes and e.meta[0] == "e":
+                    show_dir = os.path.dirname(os.path.dirname(base))  # <show>/Season NN/<file>
+                    if show_dir not in shows:
+                        shows[show_dir] = (str(tmdb_of(e.meta[2]) or "").strip(), e.mtime)
                 movie = e.meta[0] == "m"
                 if not (self.nfo or (movie and (self.movie_details or self.artwork))):
                     continue
@@ -1524,6 +1711,7 @@ class StrmWriter:
                         if rel in old:
                             want[rel] = old[rel]
                         downloads.append((rel, url, mtime))
+            theme_jobs = self.themes.plan(shows, old, want, self.root) if self.themes else []
             for rel in old:
                 if rel not in want:
                     try:
@@ -1542,9 +1730,14 @@ class StrmWriter:
             log.info("STRM: %d files in %s, %d of them .nfo (%d written, %d removed) in %.0fs",
                      len(want), self.root, nfos, written, removed, time.time() - t0)
             images = self._download_art(downloads, want) if downloads and download else 0
+            themes = self.themes.fetch(theme_jobs, want, self.root, self._save) \
+                if theme_jobs and download else 0
             STATUS["strm"] = {"running": False, "time": int(time.time()), "files": len(want),
-                              "nfo": nfos, "written": written + images, "removed": removed,
-                              "images": images, "seconds": round(time.time() - t0)}
+                              "nfo": nfos, "written": written + images + themes, "removed": removed,
+                              "images": images, "themes": themes,
+                              "seconds": round(time.time() - t0)}
+            if self.themes:
+                STATUS["themes"] = self.themes.summary()
         except Exception as e:
             log.error("STRM sync failed: %s", e)
             STATUS["strm"] = {"running": False, "time": int(time.time()), "error": scrub(e)}
@@ -1645,7 +1838,9 @@ class XtreamFS(fuse.Operations):
         self.details = self._load_json(self.details_path, {})
         self.strm = (StrmWriter(cfg.strm_dir, cfg.cache_dir, cfg.strm_nfo, cfg.strip_prefix,
                                 cfg.strm_nfo_lock, self.details, cfg.movie_details,
-                                cfg.movie_artwork, cfg.user_agent) if cfg.strm_dir else None)
+                                cfg.movie_artwork, cfg.user_agent,
+                                themes=ThemeFinder(cfg) if cfg.series_themes else None)
+                     if cfg.strm_dir else None)
         self.state_path = os.path.join(cfg.cache_dir, "state.json")
         self.state = self._load_json(self.state_path, {})
         catalog = self._load_json(self.catalog_path, None)

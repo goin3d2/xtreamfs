@@ -262,7 +262,7 @@ async function loadStatus(){
   const s=d.status,now=d.now,c=d.catalog||{};
   const busy=s.phase!=="idle";
   const strmBusy=s.strm&&s.strm.running;
-  const strmText=strmBusy&&s.strm.art?`Downloading artwork`:"Writing .strm files";
+  const strmText=strmBusy&&s.strm.themes_progress?`Finding theme songs (${fmtN(s.strm.themes_progress[0])} of ${fmtN(s.strm.themes_progress[1])})`:(strmBusy&&s.strm.art?`Downloading artwork`:"Writing .strm files");
   $("#phasepill").textContent=busy?PH[s.phase]||s.phase:(strmBusy?strmText:"Idle");
   $("#phasepill").classList.toggle("busy",busy||strmBusy);
   $("#phase").textContent=busy?PH[s.phase]||s.phase:(strmBusy?strmText:"Idle");
@@ -299,6 +299,7 @@ async function loadStatus(){
     [".strm copy",st?(st.running?"Writing…":(st.error?"Failed":fmtN(st.files))):(d.strm_dir?"–":"Off"),st&&!st.running&&!st.error?`${fmtN(st.written)} written, ${fmtN(st.removed)} removed ${ago(st.time,now)}`:(st&&st.error?esc(st.error):"")],
     ...(d.mount?[["Provider",s.provider?ago(s.provider.time,now):"quiet",s.provider?esc(s.provider.msg.replace(/^Provider, last \d+s: /,"")):"No streaming activity reported yet"]]:[["Mode",".strm only","The Plex mount is turned off (MOUNT=0)"]]),
     ["Refused titles",fmtN(d.unavailable),"hidden for now, checked again later"],
+    ...(s.themes?[["Theme songs",fmtN(s.themes.found),`${fmtN(s.themes.none)} not on Plex, ${fmtN(s.themes.noid)} without a TVDB id`]]:[]),
   ];
   $("#cards").innerHTML=cards.map(([h,b,m])=>`<div class="card"><h2>${h}</h2><div class="big">${b}</div><div class="muted" style="font-size:12px">${m}</div></div>`).join("");
   // folders

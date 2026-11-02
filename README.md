@@ -151,6 +151,10 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `STRM_NFO_LOCK` | `0` | `1` marks those `.nfo` files locked, so the server skips online lookups for them |
 | `MOVIE_DETAILS` | `0` | `1` fetches each movie's full details from the provider (once, cached) and writes them into the movies' `.nfo` files. See [Full movie details](#full-movie-details-and-artwork) |
 | `MOVIE_ARTWORK` | `0` | `1` downloads each movie's poster and backdrop into its folder (`poster.jpg`, `fanart.jpg`) |
+| `SERIES_THEMES` | `0` | `1` puts each show's theme song in its `.strm` folder as `theme.mp3`. See [Theme songs](#theme-songs) |
+| `TMDB_API_KEY` | empty | TMDB v3 key or v4 read access token. Needed by `SERIES_THEMES` to find shows' TVDB ids |
+| `THEME_LOOKUPS` | `500` | Shows looked up for a theme per sync |
+| `THEME_RETRY_DAYS` | `30` | Days before a show with no theme is looked up again |
 | `SHRINK_GUARD_PERCENT` | `25` | Keep the previous catalog if a refresh would remove more than this share of movies or shows (0 turns it off) |
 | `MAX_STREAMS` | `1` | Most connections to the provider at once |
 | `REFRESH_HOURS` | `12` | How often to re-read the catalog |
@@ -284,6 +288,26 @@ Either way the details come from the provider, which mostly copies them from
 TMDB. What it doesn't have: actor photos, age ratings, studios and collections.
 Leave the `.nfo` files unlocked and the server still fills those in from TMDB at
 its own pace; lock them and the movie scan makes no online requests at all.
+
+### Theme songs
+
+`SERIES_THEMES=1` gives shows in the `.strm` copy a `theme.mp3`, which Emby and
+Jellyfin play in the background while you browse the show. Themes come from
+Plex's theme server, which keys them by TVDB id. The catalog only has TMDB ids,
+so `TMDB_API_KEY` is needed to look up each show's TVDB id (once per show).
+
+- Each sync looks up at most `THEME_LOOKUPS` shows (default 500), one at a time,
+  so a big catalog is covered over several syncs.
+- Results are kept in `themes.json`. A show whose theme was found isn't looked up
+  again; one with no theme, or no TVDB id, is tried again after
+  `THEME_RETRY_DAYS` (default 30).
+- Plex covers well-known and older shows best. Expect roughly one show in five
+  on a typical IPTV catalog.
+- Files are 0.3 to 1.5 MB each. Turning the setting off deletes them, and
+  removed shows lose theirs with the rest of their folder.
+
+The Plex mount doesn't need this: Plex fetches the same themes itself for shows
+it matches.
 
 ## When the provider reorganizes its categories
 
