@@ -385,7 +385,7 @@ async function loadSettings(){
     let input;
     if(f.kind==="bool")input=`<label class="row"><input type="checkbox" data-name="${f.name}" ${f.value==="1"?"checked":""}> On</label>`;
     else if(f.kind.startsWith("choice:"))input=`<select data-name="${f.name}">${f.kind.slice(7).split(",").map(o=>`<option ${o===f.value?"selected":""}>${o}</option>`).join("")}</select>`;
-    else input=`<input type="${f.kind==="number"?"number":"text"}" step="any" data-name="${f.name}" value="${esc(f.value)}">`;
+    else input=`<input type="${f.kind==="number"?"number":(f.kind==="secret"?"password":"text")}" step="any" autocomplete="off" data-name="${f.name}" value="${esc(f.value)}">`;
     const src=f.source==="page"?'<span class="badge page">set here</span>':f.source==="env"?'<span class="badge">.env</span>':'<span class="badge">default</span>';
     html+=`<div class="field"><label>${esc(f.label)} ${f.restart?'<span class="badge">restart</span>':""}</label>
       <div class="row" style="flex-wrap:nowrap">${input} ${src} ${f.source==="page"?`<button class="btn" onclick="resetField('${f.name}')">Reset</button>`:""}</div>

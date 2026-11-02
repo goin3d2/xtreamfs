@@ -50,6 +50,7 @@ EDITABLE = {
     "MOVIE_CATEGORY_FOLDERS", "SERIES_CATEGORY_FOLDERS", "REFRESH_HOURS",
     "SHRINK_GUARD_PERCENT", "SHRINK_GUARD_MIN", "STRIP_PREFIX", "API_DELAY",
     "STRM_NFO", "STRM_NFO_LOCK", "MOVIE_DETAILS", "MOVIE_ARTWORK", "UNAVAILABLE_RETRY_HOURS", "REDIRECT_CACHE_MINUTES",
+    "SERIES_THEMES", "TMDB_API_KEY", "THEME_LOOKUPS", "THEME_RETRY_DAYS",
     "MAX_STREAMS", "USER_AGENT", "CACHE_MB", "CACHE_EDGE_MB", "STATS_INTERVAL",
     "LOG_LEVEL",
 }
@@ -1421,9 +1422,7 @@ class ThemeFinder:
     FAILED_RETRY = 12 * 3600
 
     def __init__(self, cfg):
-        self.key = cfg.tmdb_key
-        self.limit = cfg.theme_lookups
-        self.retry = cfg.theme_retry_days * 86400
+        self.configure(cfg)
         self.path = os.path.join(cfg.cache_dir, "themes.json")
         self.s = requests.Session()
         self.s.headers["User-Agent"] = "xtreamfs"
@@ -1434,9 +1433,15 @@ class ThemeFinder:
         except (OSError, ValueError):
             self.state = {}
         self.last = {}
+
+    def configure(self, cfg):
+        """Apply settings (also used when they're changed on the settings page)."""
+        self.key = cfg.tmdb_key
+        self.limit = cfg.theme_lookups
+        self.retry = cfg.theme_retry_days * 86400
         if not self.key:
-            log.warning("Themes: SERIES_THEMES is on but TMDB_API_KEY is empty; "
-                        "no TVDB ids can be found, so no themes will be added")
+            log.warning("Themes: theme songs are on but TMDB_API_KEY is empty; "
+                        "no TVDB ids can be found, so no new themes will be added")
 
     def save(self):
         with self.lock:
@@ -2019,7 +2024,10 @@ class XtreamFS(fuse.Operations):
     HOT = ("movie_cats", "series_cats", "movie_exclude", "series_exclude", "movie_folders",
            "series_folders", "overrides", "refresh_hours", "shrink_guard", "shrink_guard_min",
            "movie_layout", "series_layout", "strip_prefix", "api_delay", "strm_nfo",
-           "strm_nfo_lock", "movie_details", "movie_artwork", "unavailable_retry", "redirect_ttl")
+           "strm_nfo_lock", "movie_details", "movie_artwork", "unavailable_retry", "redirect_ttl",
+           "series_themes", "tmdb_key", "theme_lookups", "theme_retry_days")
+    # Changes to these start a .strm sync (no catalog refresh needed).
+    THEME_SETTINGS = ("series_themes", "tmdb_key", "theme_lookups", "theme_retry_days")
     # Changes to these need a fresh catalog refresh to take effect.
     REFRESH = ("movie_cats", "series_cats", "movie_exclude", "series_exclude", "movie_folders",
                "series_folders", "overrides", "movie_layout", "series_layout", "strip_prefix",
@@ -2058,12 +2066,20 @@ class XtreamFS(fuse.Operations):
             self.strm.nfo, self.strm.lock_nfo = new.strm_nfo, new.strm_nfo_lock
             self.strm.movie_details, self.strm.artwork = new.movie_details, new.movie_artwork
             self.strm.strip_prefix = new.strip_prefix
+            if not new.series_themes:
+                self.strm.themes = None
+            elif self.strm.themes is None:
+                self.strm.themes = ThemeFinder(new)
+            else:
+                self.strm.themes.configure(new)
         logging.getLogger().setLevel(env("LOG_LEVEL", "INFO"))
         refresh = any(a in self.REFRESH for a in changed)
         if changed:
             log.info("Settings changed from the web page: %s", ", ".join(changed))
         if refresh:
             self.request_refresh()
+        elif self.strm and self.tree.files and any(a in self.THEME_SETTINGS for a in changed):
+            self.strm.sync_in_background(self.tree, self.is_unavailable)
         return {"changed": changed, "restart": restart, "refresh": refresh}
 
     # ---- persistence -----------------------------------------------------

@@ -54,6 +54,17 @@ FIELDS = [
     ("MOVIE_ARTWORK", "Emby / Jellyfin", "Download movie artwork", "bool", "0",
      "Save each movie's poster and backdrop next to it (poster.jpg, fanart.jpg), so the "
      "server doesn't download them. About 250 KB per movie. Turning it off deletes them."),
+    ("SERIES_THEMES", "Emby / Jellyfin", "Theme songs", "bool", "0",
+     "Put each show's theme song in its .strm folder (theme.mp3, from Plex's theme "
+     "server), so the server plays it while you browse. Needs a TMDB key. Most "
+     "well-known shows have one; many IPTV-only titles don't. Turning it off deletes them."),
+    ("TMDB_API_KEY", "Emby / Jellyfin", "TMDB API key", "secret", "",
+     "TMDB v3 key or v4 read access token. Used to find each show's TVDB id (once per show)."),
+    ("THEME_LOOKUPS", "Emby / Jellyfin", "Theme lookups per sync", "number", "500",
+     "Shows checked for a theme each time the .strm copy syncs, so a big catalog is "
+     "covered gradually."),
+    ("THEME_RETRY_DAYS", "Emby / Jellyfin", "Look again for missing themes after (days)",
+     "number", "30", "Shows with no theme, or no TVDB id, are checked again after this long."),
     ("MAX_STREAMS", "Streaming", "Max provider connections", "number", "1",
      "Your plan's connection limit, minus any you need for live TV."),
     ("USER_AGENT", "Streaming", "User agent", "text", "VLC/3.0.20 LibVLC/3.0.20",

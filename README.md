@@ -291,7 +291,8 @@ its own pace; lock them and the movie scan makes no online requests at all.
 
 ### Theme songs
 
-`SERIES_THEMES=1` gives shows in the `.strm` copy a `theme.mp3`, which Emby and
+`SERIES_THEMES=1` (or **Theme songs** on the Settings tab, under Emby / Jellyfin,
+with the TMDB key next to it) gives shows in the `.strm` copy a `theme.mp3`, which Emby and
 Jellyfin play in the background while you browse the show. Themes come from
 Plex's theme server, which keys them by TVDB id. The catalog only has TMDB ids,
 so `TMDB_API_KEY` is needed to look up each show's TVDB id (once per show).
