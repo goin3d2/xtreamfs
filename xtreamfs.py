@@ -49,7 +49,7 @@ EDITABLE = {
     "MOVIE_FOLDERS", "SERIES_FOLDERS", "MOVIE_OVERRIDES", "SERIES_OVERRIDES",
     "MOVIE_CATEGORY_FOLDERS", "SERIES_CATEGORY_FOLDERS", "REFRESH_HOURS",
     "SHRINK_GUARD_PERCENT", "SHRINK_GUARD_MIN", "STRIP_PREFIX", "API_DELAY",
-    "STRM_NFO", "STRM_NFO_LOCK", "MOVIE_DETAILS", "MOVIE_ARTWORK", "UNAVAILABLE_RETRY_HOURS", "REDIRECT_CACHE_MINUTES",
+    "STRM_NFO", "STRM_NFO_LOCK", "MOVIE_DETAILS", "MOVIE_DETAILS_SKIP", "MOVIE_ARTWORK", "UNAVAILABLE_RETRY_HOURS", "REDIRECT_CACHE_MINUTES",
     "SERIES_THEMES", "TMDB_API_KEY", "THEME_LOOKUPS", "THEME_RETRY_DAYS",
     "MAX_STREAMS", "USER_AGENT", "CACHE_MB", "CACHE_EDGE_MB", "STATS_INTERVAL",
     "LOG_LEVEL",
@@ -191,6 +191,9 @@ class Config:
         self.movie_details = env("MOVIE_DETAILS", "0") == "1"
         # Download each movie's poster and backdrop into its folder (poster.jpg, fanart.jpg).
         self.movie_artwork = env("MOVIE_ARTWORK", "0") == "1"
+        # Movie categories (IDs or names) whose films don't get full details fetched.
+        # A film listed in other categories as well still gets them.
+        self.movie_details_skip = self._list(env("MOVIE_DETAILS_SKIP", ""))
         # Put each show's theme song (theme.mp3, from Plex's theme server) in its .strm folder,
         # so Emby/Jellyfin play it while browsing. Needs a TMDB key to find TVDB ids.
         self.series_themes = env("SERIES_THEMES", "0") == "1"
@@ -881,6 +884,19 @@ def trim_details(info):
     return out
 
 
+def details_skipped(cfg: Config, catalog):
+    """A test for films whose details aren't fetched: those listed only in categories
+    named in MOVIE_DETAILS_SKIP (by ID or name, ignoring case)."""
+    wanted = {w.strip().lower() for w in cfg.movie_details_skip if w.strip()}
+    if not wanted:
+        return lambda m: False
+    names = (catalog.get("categories") or {}).get("movie", {})
+    skip = {str(cid) for cid, name in names.items()
+            if str(cid).lower() in wanted or str(name or "").strip().lower() in wanted}
+    skip |= {w for w in wanted if w.isdigit()}
+    return lambda m: bool(skip) and all(c in skip for c in item_cats(m) or ["?"])
+
+
 def fetch_movie_details(cfg: Config, catalog, cache, save, workers=2):
     """Fill `cache` with details for every movie in the catalog that hasn't got them.
 
@@ -890,9 +906,15 @@ def fetch_movie_details(cfg: Config, catalog, cache, save, workers=2):
     import concurrent.futures
     now = time.time()
     todo, keys = {}, set()
+    skipped = details_skipped(cfg, catalog)
+    held = 0
     for m in catalog.get("movies", []):
         k = details_key(m)
         keys.add(k)
+        if skipped(m):
+            if k not in todo and k not in cache:
+                held += 1
+            continue
         c = cache.get(k)
         if k in todo or (c and ("i" in c or now - c.get("t", 0) < DETAIL_RETRY)):
             continue
@@ -900,8 +922,10 @@ def fetch_movie_details(cfg: Config, catalog, cache, save, workers=2):
     # Forget films that are no longer in the catalog.
     for k in [k for k in cache if k not in keys]:
         del cache[k]
+    if held:
+        log.info("Movie details: skipping %d films in MOVIE_DETAILS_SKIP categories", held)
     if not todo:
-        log.info("Movie details: all %d cached", len(keys))
+        log.info("Movie details: all %d cached", len(keys) - held)
         return
     rate = max(0.05, cfg.api_delay + 0.25) / workers
     log.info("Movie details: %d of %d films need details (about %d min)",
@@ -2024,14 +2048,14 @@ class XtreamFS(fuse.Operations):
     HOT = ("movie_cats", "series_cats", "movie_exclude", "series_exclude", "movie_folders",
            "series_folders", "overrides", "refresh_hours", "shrink_guard", "shrink_guard_min",
            "movie_layout", "series_layout", "strip_prefix", "api_delay", "strm_nfo",
-           "strm_nfo_lock", "movie_details", "movie_artwork", "unavailable_retry", "redirect_ttl",
+           "strm_nfo_lock", "movie_details", "movie_details_skip", "movie_artwork", "unavailable_retry", "redirect_ttl",
            "series_themes", "tmdb_key", "theme_lookups", "theme_retry_days")
     # Changes to these start a .strm sync (no catalog refresh needed).
     THEME_SETTINGS = ("series_themes", "tmdb_key", "theme_lookups", "theme_retry_days")
     # Changes to these need a fresh catalog refresh to take effect.
     REFRESH = ("movie_cats", "series_cats", "movie_exclude", "series_exclude", "movie_folders",
                "series_folders", "overrides", "movie_layout", "series_layout", "strip_prefix",
-               "strm_nfo", "strm_nfo_lock", "movie_details", "movie_artwork")
+               "strm_nfo", "strm_nfo_lock", "movie_details", "movie_details_skip", "movie_artwork")
 
     def save_settings(self, changes):
         """Save settings from the web page and apply what can be applied now.
@@ -2158,7 +2182,8 @@ class XtreamFS(fuse.Operations):
     def _fetch_details(self, catalog, tree):
         """Fetch movie details the cache is missing. On a big first run the .strm files
         are written first, so the library isn't held up for hours."""
-        pending = sum(1 for m in catalog["movies"] if details_key(m) not in self.details)
+        skipped = details_skipped(self.cfg, catalog)
+        pending = sum(1 for m in catalog["movies"] if details_key(m) not in self.details and not skipped(m))
         if self.strm and pending > 500:
             self.strm.sync(tree, self.is_unavailable, download=False)
         try:

@@ -150,6 +150,7 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `STRM_NFO` | `0` | `1` also writes `.nfo` metadata files next to the `.strm` files |
 | `STRM_NFO_LOCK` | `0` | `1` marks those `.nfo` files locked, so the server skips online lookups for them |
 | `MOVIE_DETAILS` | `0` | `1` fetches each movie's full details from the provider (once, cached) and writes them into the movies' `.nfo` files. See [Full movie details](#full-movie-details-and-artwork) |
+| `MOVIE_DETAILS_SKIP` | | Movie categories (IDs or names, comma-separated) whose films don't get full details |
 | `MOVIE_ARTWORK` | `0` | `1` downloads each movie's poster and backdrop into its folder (`poster.jpg`, `fanart.jpg`) |
 | `SERIES_THEMES` | `0` | `1` puts each show's theme song in its `.strm` folder as `theme.mp3`. See [Theme songs](#theme-songs) |
 | `TMDB_API_KEY` | empty | TMDB v3 key or v4 read access token. Needed by `SERIES_THEMES` to find shows' TVDB ids |
@@ -278,6 +279,10 @@ These go into the movie's `.nfo` (movies get one even with `STRM_NFO=0`).
   (a few hours for 100,000 films) and later refreshes only fetch new movies.
   On a big first run the `.strm` files are written before the details start.
 - A movie whose details fail is tried again after a week.
+- `MOVIE_DETAILS_SKIP` lists movie categories, by ID or name, whose films are
+  left out, for example a big category you'll rarely watch. A film that's also in
+  a category you haven't skipped still gets its details. Skipped films keep the
+  basic `.nfo` from the catalog list (title, year, rating, poster).
 
 `MOVIE_ARTWORK=1` downloads each movie's poster and backdrop next to it as
 `poster.jpg` and `fanart.jpg` (about 250 KB per movie), four at a time. Emby and

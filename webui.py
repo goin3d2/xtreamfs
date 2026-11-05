@@ -51,6 +51,9 @@ FIELDS = [
      "Ask the provider for each movie's plot, genres, cast, runtime and backdrop (one "
      "request per film, cached) and write them into the movies' .nfo files. The first "
      "run takes a few hours on a big catalog; later refreshes only fetch new movies."),
+    ("MOVIE_DETAILS_SKIP", "Emby / Jellyfin", "Skip details for these categories", "text", "",
+     "Movie categories (IDs or names, comma-separated) whose films don't get full details, "
+     "e.g. 936 or Unlabeled Movies. A film also listed in another category still gets them."),
     ("MOVIE_ARTWORK", "Emby / Jellyfin", "Download movie artwork", "bool", "0",
      "Save each movie's poster and backdrop next to it (poster.jpg, fanart.jpg), so the "
      "server doesn't download them. About 250 KB per movie. Turning it off deletes them."),
