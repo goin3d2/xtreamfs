@@ -80,12 +80,21 @@ FIELDS = [
      "How much of each file's start and end counts as cacheable."),
     ("STATS_INTERVAL", "Streaming", "Stats line every (seconds)", "number", "60",
      "0 turns the provider stats line off."),
+    ("PREFETCH", "Streaming", "Pre-fetch files ahead", "number", "0",
+     "When a file is opened, fetch the start and end of this many following files in "
+     "the same show, so Plex's analysis reads them from memory. 0 = off; 5 suits a "
+     "first scan."),
+    ("PREFETCH_HEAD_MB", "Streaming", "Pre-fetch start of each file (MB)", "number", "3",
+     "At most the cached edge size."),
+    ("PREFETCH_TAIL_MB", "Streaming", "Pre-fetch end of each file (MB)", "number", "1",
+     "Where MKV and MP4 files keep their index."),
     ("LOG_LEVEL", "Streaming", "Log level", "choice:DEBUG,INFO,WARNING,ERROR", "INFO", ""),
 ]
-RESTART = {"MAX_STREAMS", "USER_AGENT", "CACHE_MB", "CACHE_EDGE_MB", "STATS_INTERVAL"}
+RESTART = {"MAX_STREAMS", "USER_AGENT", "CACHE_MB", "CACHE_EDGE_MB", "STATS_INTERVAL",
+           "PREFETCH", "PREFETCH_HEAD_MB", "PREFETCH_TAIL_MB"}
 # Settings that only affect streaming through the Plex mount.
 MOUNT_ONLY = {"MAX_STREAMS", "REDIRECT_CACHE_MINUTES", "CACHE_MB", "CACHE_EDGE_MB",
-              "STATS_INTERVAL"}
+              "STATS_INTERVAL", "PREFETCH", "PREFETCH_HEAD_MB", "PREFETCH_TAIL_MB"}
 CATEGORY_KEYS = {"MOVIE_CATEGORIES", "SERIES_CATEGORIES", "MOVIE_EXCLUDE", "SERIES_EXCLUDE",
                  "MOVIE_FOLDERS", "SERIES_FOLDERS"}
 

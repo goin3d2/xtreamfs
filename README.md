@@ -123,7 +123,16 @@ of stream requests. To keep the load down:
   you need for live TV. While a scan is running and someone is watching, they
   share that limit.
 - **File sizes are looked up once** with a 1-byte request and cached in
-  `config/sizes.json`, so restarts and rescans don't repeat it.
+  `config/sizes.json`, so restarts and rescans don't repeat it. If the provider
+  later replaces a file with a smaller one, the first read past its new end
+  (an HTTP 416) corrects the saved size, and the read ends there cleanly.
+- **Turn on pre-fetch for first scans** (`PREFETCH=5`). Plex analyses a show's
+  episodes one at a time, and each one costs a couple of seconds of provider
+  round trips. With pre-fetch on, opening an episode fetches the start and end
+  of the next few (carrying on into the next season) in the background, using
+  only connections nobody else needs, so Plex reads them from memory. It also
+  checks each file's size on the way. It needs the memory cache (`CACHE_MB`)
+  and is useful mainly while a big library is being scanned for the first time.
 
 ## Settings
 
@@ -167,6 +176,9 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `UNAVAILABLE_RETRY_HOURS` | `24` | How long to hide a title the provider refuses (403/404) before checking it again |
 | `CACHE_MB` | `256` | Memory for caching the start and end of recently read files (0 turns it off) |
 | `CACHE_EDGE_MB` | `8` | How much of each file's start and end counts as cacheable |
+| `PREFETCH` | `0` | When a file is opened, fetch the start and end of this many following files in the same show in the background (0 turns it off; 5 is a good value during a first scan) |
+| `PREFETCH_HEAD_MB` | `3` | How much of each file's start to pre-fetch (at most `CACHE_EDGE_MB`) |
+| `PREFETCH_TAIL_MB` | `1` | How much of each file's end to pre-fetch, where MKV and MP4 keep their index |
 
 ## Category subfolders
 
@@ -411,6 +423,11 @@ Provider, last 60s: 42 requests for 15 files | first byte avg 1.84s, p90 3.10s |
 - **redirect-cache hits** are requests that skipped the provider's redirect.
 - **reads served from memory** are repeat reads of a file's start or end that
   never reached the provider.
+- **files pre-fetched** (with `PREFETCH` on) are files whose start and end were
+  fetched ahead of Plex. During a scan, most requests should then be these, and
+  *reads served from memory* should climb.
+- **file sizes corrected** are files the provider replaced with a different
+  size since xtreamfs first saw them.
 - **unavailable at provider** are titles the provider refuses (403/404), usually
   broken uploads. They're hidden from Plex and checked again daily; the list is
   in `config/unavailable.json`.

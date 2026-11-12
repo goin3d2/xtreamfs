@@ -14,6 +14,7 @@ Configuration is by environment variable (see README.md).
 Run with --list-categories to print the category IDs your provider offers.
 """
 
+import bisect
 import collections
 import hashlib
 import json
@@ -24,7 +25,7 @@ import stat
 import sys
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from errno import EIO, ENOENT
 
 import requests
@@ -52,7 +53,7 @@ EDITABLE = {
     "STRM_NFO", "STRM_NFO_LOCK", "MOVIE_DETAILS", "MOVIE_DETAILS_SKIP", "MOVIE_ARTWORK", "UNAVAILABLE_RETRY_HOURS", "REDIRECT_CACHE_MINUTES",
     "SERIES_THEMES", "TMDB_API_KEY", "THEME_LOOKUPS", "THEME_RETRY_DAYS",
     "MAX_STREAMS", "USER_AGENT", "CACHE_MB", "CACHE_EDGE_MB", "STATS_INTERVAL",
-    "LOG_LEVEL",
+    "PREFETCH", "PREFETCH_HEAD_MB", "PREFETCH_TAIL_MB", "LOG_LEVEL",
 }
 # The provider login can also be saved from the page (its own section, never
 # shown back), so a first start can be set up entirely from the browser.
@@ -210,6 +211,12 @@ class Config:
         self.cache_mb = max(0, int(env("CACHE_MB", "256")))
         self.cache_edge_mb = max(0, int(env("CACHE_EDGE_MB", "8")))
         self.stats_interval = float(env("STATS_INTERVAL", "60"))
+        # When a file is opened, fetch the start and end of the next few files in
+        # the same show in the background, so Plex's media analysis of them is
+        # served from memory (0 = off).
+        self.prefetch = max(0, int(float(env("PREFETCH", "0") or 0)))
+        self.prefetch_head_mb = max(0.0, float(env("PREFETCH_HEAD_MB", "3")))
+        self.prefetch_tail_mb = max(0.0, float(env("PREFETCH_TAIL_MB", "1")))
 
     @staticmethod
     def _list(s):
@@ -1009,6 +1016,15 @@ class ConnectionPool:
             self.active.move_to_end(stream)
             return True
 
+    def try_acquire(self, stream, reserve=1):
+        """Take a connection only if one is free, keeping `reserve` free for
+        real reads. Never closes anyone else's connection."""
+        with self.cond:
+            if len(self.active) < self.limit - reserve:
+                self.active[stream] = True
+                return True
+            return False
+
     def touch(self, stream):
         with self.cond:
             if stream in self.active:
@@ -1033,6 +1049,7 @@ class Stats:
 
     def _reset(self):
         self.requests = self.redirects = self.cache_hits = self.errors = 0
+        self.prefetched = self.resized = 0
         self.mem_reads = 0
         self.unavailable = 0
         self.error_kinds = collections.Counter()
@@ -1060,6 +1077,15 @@ class Stats:
             self.errors += 1
             self.error_kinds[kind] += 1
 
+    def prefetch(self, resized=False):
+        with self.lock:
+            self.prefetched += 1
+            self.resized += resized
+
+    def size_fixed(self):
+        with self.lock:
+            self.resized += 1
+
     def mem_read(self):
         with self.lock:
             self.mem_reads += 1
@@ -1070,7 +1096,7 @@ class Stats:
 
     def report(self, interval):
         with self.lock:
-            if not self.requests and not self.mem_reads:
+            if not self.requests and not self.mem_reads and not self.prefetched:
                 return None
             t = sorted(self.ttfb) or [0]
             msg = ("Provider, last %ds: %d requests for %d files | first byte avg %.2fs, "
@@ -1081,6 +1107,10 @@ class Stats:
                 t[int(len(t) * 0.9) if len(t) > 1 else 0], self.redirects,
                 self.cache_hits, self.bytes / 2**20, self.errors, self.unavailable,
                 self.mem_reads)
+            if self.prefetched:
+                msg += " | %d files pre-fetched" % self.prefetched
+            if self.resized:
+                msg += " | %d file sizes corrected" % self.resized
             if self.error_kinds:
                 msg += " (" + ", ".join(f"{k} x{v}" for k, v in
                                        self.error_kinds.most_common(4)) + ")"
@@ -1132,6 +1162,16 @@ class EdgeCache:
         start = offset - first * BLOCK
         return data[start:start + (end - offset)]
 
+    def has(self, key, offset):
+        with self.lock:
+            return (key, offset // BLOCK) in self.blocks
+
+    def drop(self, key):
+        """Forget a file's blocks (its size changed, so its end moved)."""
+        with self.lock:
+            for k in [k for k in self.blocks if k[0] == key]:
+                self.used -= len(self.blocks.pop(k))
+
     def put(self, key, offset, data, file_size):
         """Store the whole blocks contained in data (which starts at offset)."""
         if not self.enabled() or offset % BLOCK:
@@ -1153,6 +1193,30 @@ class EdgeCache:
             while self.used > self.max_bytes and self.blocks:
                 _, old = self.blocks.popitem(last=False)
                 self.used -= len(old)
+
+
+class SizeChanged(Exception):
+    """The provider answered 416: the saved file size is larger than the file."""
+    def __init__(self, size):
+        super().__init__(f"file is now {size} bytes" if size else "file size changed")
+        self.size = size
+
+
+def range_total(r):
+    """The full file size from a Content-Range header (206 or 416), or 0."""
+    m = re.search(r"/(\d+)\s*$", r.headers.get("Content-Range", ""))
+    return int(m.group(1)) if m else 0
+
+
+def read_n(r, n):
+    chunks, got = [], 0
+    while got < n:
+        b = r.raw.read(n - got)
+        if not b:
+            break
+        chunks.append(b)
+        got += len(b)
+    return b"".join(chunks)
 
 
 class Stream:
@@ -1194,6 +1258,11 @@ class Stream:
             raise
         if r.status_code == 200:
             start = 0  # server ignored the range; the body starts at byte 0
+        elif r.status_code == 416:
+            total = range_total(r)
+            r.close()
+            self.fs.pool.release(self)
+            raise SizeChanged(total)
         elif r.status_code != 206:
             r.close()
             self.fs.pool.release(self)
@@ -1221,7 +1290,21 @@ class Stream:
                         return cached
                 if self.resp is None or offset < self.pos or \
                         offset - self.pos > SKIP_FORWARD:
-                    self._open(offset)
+                    try:
+                        self._open(offset)
+                    except SizeChanged as e:
+                        # The saved size is out of date (the provider replaced the
+                        # file). Learn the real one; reads past it are end-of-file.
+                        new = e.size or self.fs.reprobe_size(self.entry)
+                        if not new:
+                            raise OSError(EIO, "HTTP 416")
+                        if new != self.size:
+                            self.fs.set_size(self.entry, new, self.size)
+                            self.size = new
+                        if offset >= self.size:
+                            return b""
+                        size = min(size, self.size - offset)
+                        self._open(offset)
                 elif offset > self.pos:
                     self._read_exact(offset - self.pos)
                 data = self._read_exact(size)
@@ -1276,6 +1359,160 @@ class Stream:
         with self.lock:
             self._close_locked_by_pool()
         self.fs.pool.release(self)
+
+
+class Prefetcher:
+    """Fetches the start and end of the next few files in a show in the background.
+
+    Plex's media analysis opens a show's episodes one after another and, for
+    each one, reads its header and then its end (where MKV and MP4 keep their
+    index). Each of those is a fresh provider connection with its redirect, so
+    it takes a couple of seconds per file. When a file is opened, the next few
+    files in the same folder (then the following season folders) are fetched
+    ahead into the edge cache, using only connections nobody else needs, so the
+    analysis finds them in memory. The fetch also checks each file's size.
+    """
+
+    def __init__(self, fs, ahead, head_mb, tail_mb):
+        self.fs = fs
+        self.ahead = ahead
+        edge = fs.cache.edge
+        self.head = min(edge, int(head_mb * 2**20)) // BLOCK * BLOCK
+        self.tail = min(edge, int(tail_mb * 2**20))
+        self.queue = deque()
+        self.queued = set()
+        self.cond = threading.Condition()
+        self.sorted = OrderedDict()  # (id(tree), folder) -> sorted names
+        workers = max(1, min(2, fs.cfg.max_streams - 1))
+        for _ in range(workers):
+            threading.Thread(target=self._worker, daemon=True).start()
+        log.info("Pre-fetch on: %d files ahead, first %.1f MB and last %.1f MB of each "
+                 "(%d worker%s)", ahead, self.head / 2**20, self.tail / 2**20,
+                 workers, "" if workers == 1 else "s")
+
+    def _names(self, tree, folder):
+        k = (id(tree), folder)
+        names = self.sorted.get(k)
+        if names is None:
+            names = sorted(tree.dirs.get(folder, ()))
+            self.sorted[k] = names
+            while len(self.sorted) > 64:
+                self.sorted.popitem(last=False)
+        return names
+
+    def _files_after(self, tree, folder, after, out):
+        names = self._names(tree, folder)
+        base = "" if folder == "/" else folder
+        for n in names[bisect.bisect_right(names, after) if after else 0:]:
+            p = f"{base}/{n}"
+            if p in tree.files:
+                out.append(p)
+                if len(out) >= self.ahead:
+                    return
+
+    def next_files(self, path):
+        tree = self.fs.tree
+        folder, name = path.rsplit("/", 1)
+        folder = folder or "/"
+        out = []
+        self._files_after(tree, folder, name, out)
+        if len(out) < self.ahead and folder != "/":
+            # Carry on into the next season folders of the same show.
+            parent, me = folder.rsplit("/", 1)
+            parent = parent or "/"
+            names = self._names(tree, parent)
+            base = "" if parent == "/" else parent
+            for n in names[bisect.bisect_right(names, me):]:
+                d = f"{base}/{n}"
+                if d in tree.dirs:
+                    self._files_after(tree, d, None, out)
+                    if len(out) >= self.ahead:
+                        break
+        return out
+
+    def on_open(self, path):
+        try:
+            nxt = self.next_files(path)
+        except Exception as e:
+            log.debug("Pre-fetch list for %s: %s", path, e)
+            return
+        tree = self.fs.tree
+        with self.cond:
+            # The newest request goes first; stale ones drop off the end.
+            for p in reversed(nxt):
+                e = tree.files.get(p)
+                if e is None or e.key in self.queued:
+                    continue
+                self.queue.appendleft(e)
+                self.queued.add(e.key)
+            while len(self.queue) > self.ahead * 4:
+                self.queued.discard(self.queue.pop().key)
+            self.cond.notify_all()
+
+    def _cached(self, e, size):
+        c = self.fs.cache
+        return bool(size) and c.has(e.key, 0) and (not self.tail or c.has(e.key, size - 1))
+
+    def _worker(self):
+        fs = self.fs
+        while True:
+            with self.cond:
+                while not self.queue:
+                    self.cond.wait()
+                e = self.queue.popleft()
+                self.queued.discard(e.key)
+            if fs.is_unavailable(e) or self._cached(e, fs.sizes.get(e.key)):
+                continue
+            slot = Stream(fs, e, 0)
+            slot.busy = True  # never evicted mid-fetch; it lets go within a second or two
+            deadline = time.time() + 20
+            while not fs.pool.try_acquire(slot):
+                if time.time() > deadline:
+                    break
+                time.sleep(0.25)
+            else:
+                try:
+                    self._fetch(e)
+                except Exception as ex:
+                    log.debug("Pre-fetch %s: %s", e.key, ex)
+                finally:
+                    fs.pool.release(slot)
+
+    def _fetch(self, e):
+        fs, cache = self.fs, self.fs.cache
+        known = fs.sizes.get(e.key, 0)
+        r = fs.fetch(e, f"bytes=0-{self.head - 1}", (15, 30))
+        try:
+            if r.status_code != 206:
+                return  # unavailable, or no range support: leave it to the normal path
+            total = range_total(r)
+            data = read_n(r, self.head)
+        finally:
+            r.close()
+        resized = False
+        if total and total != known:
+            if known:
+                fs.set_size(e, total, known, count=False)
+                resized = True
+            else:
+                fs.learn_size(e, total)
+        size = total or known
+        if not size:
+            return
+        fs.stats.add_bytes(len(data))
+        cache.put(e.key, 0, data, size)
+        if self.tail and size > self.head:
+            start = max(self.head, size - self.tail)
+            start -= start % BLOCK
+            r = fs.fetch(e, f"bytes={start}-", (15, 30))
+            try:
+                if r.status_code == 206:
+                    data = read_n(r, size - start)
+                    fs.stats.add_bytes(len(data))
+                    cache.put(e.key, start, data, size)
+            finally:
+                r.close()
+        fs.stats.prefetch(resized)
 
 
 # --------------------------------------------------------------------------
@@ -1862,6 +2099,14 @@ class XtreamFS(fuse.Operations):
         self.unavail_dirty = False
         self.size_lock = threading.Lock()
         self.sizes_dirty = False
+        self.prefetcher = None
+        if cfg.prefetch:
+            if self.cache.enabled():
+                self.prefetcher = Prefetcher(self, cfg.prefetch, cfg.prefetch_head_mb,
+                                             cfg.prefetch_tail_mb)
+            else:
+                log.warning("PREFETCH is on but the memory cache is off (CACHE_MB or "
+                            "CACHE_EDGE_MB is 0); pre-fetch needs it, so it stays off")
 
         self.details_path = os.path.join(cfg.cache_dir, "movie_details.json")
         self.details = self._load_json(self.details_path, {})
@@ -2311,6 +2556,27 @@ class XtreamFS(fuse.Operations):
                 self.size_fail[entry.key] = time.time()
         return size
 
+    def learn_size(self, entry, size):
+        with self.size_lock:
+            self.sizes[entry.key] = size
+            self.sizes_dirty = True
+            if self.unavailable.pop(entry.key, None):
+                self.unavail_dirty = True
+
+    def set_size(self, entry, size, old, count=True):
+        """Correct a saved size that no longer matches the provider's file."""
+        with self.size_lock:
+            self.sizes[entry.key] = size
+            self.sizes_dirty = True
+        self.cache.drop(entry.key)
+        if count:
+            self.stats.size_fixed()
+        log.info("Size of %s changed at the provider: %d -> %d bytes", entry.key, old, size)
+
+    def reprobe_size(self, entry):
+        size, _ = self._probe_size(entry)
+        return size
+
     def fetch(self, entry, byte_range, timeout):
         """GET a byte range of a title from the provider.
 
@@ -2429,6 +2695,8 @@ class XtreamFS(fuse.Operations):
             fh = self.next_fh
             self.next_fh += 1
             self.handles[fh] = Stream(self, e, size)
+        if self.prefetcher:
+            self.prefetcher.on_open(path)
         return fh
 
     def read(self, path, size, offset, fh):
