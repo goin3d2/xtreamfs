@@ -54,6 +54,7 @@ EDITABLE = {
     "SERIES_THEMES", "TMDB_API_KEY", "THEME_LOOKUPS", "THEME_RETRY_DAYS",
     "MAX_STREAMS", "USER_AGENT", "CACHE_MB", "CACHE_EDGE_MB", "STATS_INTERVAL",
     "PREFETCH", "PREFETCH_HEAD_MB", "PREFETCH_TAIL_MB", "LOG_LEVEL",
+    "PLEX_URL", "PLEX_TOKEN", "PLEX_PATH", "PLEX_SCAN_MAX",
 }
 # The provider login can also be saved from the page (its own section, never
 # shown back), so a first start can be set up entirely from the browser.
@@ -217,6 +218,17 @@ class Config:
         self.prefetch = max(0, int(float(env("PREFETCH", "0") or 0)))
         self.prefetch_head_mb = max(0.0, float(env("PREFETCH_HEAD_MB", "3")))
         self.prefetch_tail_mb = max(0.0, float(env("PREFETCH_TAIL_MB", "1")))
+        # Tell Plex which folders changed after each refresh, so it scans just those
+        # (a FUSE mount sends no change notifications). Off unless both are set.
+        self.plex_url = (env("PLEX_URL", "") or "").strip().rstrip("/")
+        self.plex_token = (env("PLEX_TOKEN", "") or "").strip()
+        # How Plex sees the mount (its path inside the Plex container), e.g. /vod.
+        self.plex_path = (env("PLEX_PATH", "") or "").strip().rstrip("/") or \
+            self.mount.rstrip("/")
+        # More changed folders than this in one library: scan the whole library instead.
+        self.plex_scan_max = max(1, int(float(env("PLEX_SCAN_MAX", "300") or 300)))
+        if len(self.plex_token) >= 3 and self.plex_token not in SECRETS:
+            SECRETS.append(self.plex_token)
 
     @staticmethod
     def _list(s):
@@ -1515,6 +1527,121 @@ class Prefetcher:
         fs.stats.prefetch(resized)
 
 
+def _parent(path):
+    return path.rsplit("/", 1)[0] or "/"
+
+
+def _top_new(folder, existing):
+    """Climb from folder to the highest folder that isn't in `existing`."""
+    while folder != "/" and _parent(folder) != "/" and _parent(folder) not in existing:
+        folder = _parent(folder)
+    return folder
+
+
+def changed_folders(old, new):
+    """Folders to rescan after a refresh: the folder of each added or removed file,
+    or, when a whole show or movie folder is new (or gone), that folder."""
+    out = set()
+    for p in new.files.keys() - old.files.keys():
+        out.add(_top_new(_parent(p), old.dirs))
+    for p in old.files.keys() - new.files.keys():
+        out.add(_top_new(_parent(p), new.dirs))
+    # A folder already covered by a changed parent needn't be scanned separately.
+    def covered(f):
+        while f != "/":
+            f = _parent(f)
+            if f in out:
+                return True
+        return False
+    out = {f for f in out if not covered(f)}
+    out.discard("/")
+    return out
+
+
+class PlexNotifier:
+    """Asks Plex to scan only the folders a refresh changed.
+
+    Plex's own "scan automatically when changes are detected" relies on file
+    change notifications, which a FUSE mount never sends. So after each refresh
+    this finds the Plex libraries whose folders cover the mount and sends a
+    partial scan for each changed show or movie folder, the way Autoscan does
+    for Sonarr. A library with a lot of changes gets one full scan instead.
+    """
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.s = requests.Session()
+        self.s.headers.update({"X-Plex-Token": cfg.plex_token, "Accept": "application/xml"})
+        self.lock = threading.Lock()
+
+    def _get(self, endpoint, **params):
+        r = self.s.get(self.cfg.plex_url + endpoint, params=params, timeout=30)
+        r.raise_for_status()
+        return r
+
+    def sections(self):
+        """[(key, title, [locations])] for every Plex library."""
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(self._get("/library/sections").content)
+        return [(d.get("key"), d.get("title"),
+                 [loc.get("path", "").rstrip("/") for loc in d.findall("Location")])
+                for d in root.findall("Directory")]
+
+    def check(self):
+        """Log which Plex libraries use the mount. Returns (ok, message)."""
+        try:
+            secs = self.sections()
+        except Exception as e:
+            return False, f"Plex: can't reach {self.cfg.plex_url}: {scrub(e)}"
+        base = self.cfg.plex_path
+        mine = [(t, [l for l in locs if l == base or l.startswith(base + "/")])
+                for _, t, locs in secs]
+        mine = [(t, ls) for t, ls in mine if ls]
+        if not mine:
+            return True, (f"Plex: connected, but no library uses a folder under {base}. "
+                          "Check PLEX_PATH (the mount's path as Plex sees it).")
+        return True, "Plex: will scan changed folders in " + ", ".join(
+            f"{t} ({', '.join(ls)})" for t, ls in mine)
+
+    def notify(self, folders):
+        """Send partial scans for the changed folders (mount paths). Returns a summary."""
+        with self.lock:
+            secs = self.sections()
+            base = self.cfg.plex_path
+            by_section = collections.defaultdict(list)
+            outside = 0
+            for f in sorted(folders):
+                plex_path = base + f
+                best = None
+                for key, title, locs in secs:
+                    for loc in locs:
+                        if (plex_path == loc or plex_path.startswith(loc + "/")) and \
+                                (best is None or len(loc) > len(best[2])):
+                            best = (key, title, loc)
+                if best:
+                    by_section[(best[0], best[1])].append(plex_path)
+                else:
+                    outside += 1
+            sent, full = 0, []
+            for (key, title), paths in by_section.items():
+                if len(paths) > self.cfg.plex_scan_max:
+                    self._get(f"/library/sections/{key}/refresh")
+                    full.append(title)
+                    log.info("Plex: %d folders changed in %s; scanning the whole library",
+                             len(paths), title)
+                    continue
+                for path in paths:
+                    self._get(f"/library/sections/{key}/refresh", path=path)
+                    sent += 1
+                    time.sleep(0.05)
+                log.info("Plex: asked %s to scan %d changed folder%s", title, len(paths),
+                         "" if len(paths) == 1 else "s")
+            if outside:
+                log.debug("Plex: %d changed folders aren't in any Plex library", outside)
+            return {"time": int(time.time()), "folders": sent, "full": full,
+                    "libraries": sorted(t for _, t in by_section), "outside": outside}
+
+
 # --------------------------------------------------------------------------
 # Filesystem
 # --------------------------------------------------------------------------
@@ -2099,6 +2226,10 @@ class XtreamFS(fuse.Operations):
         self.unavail_dirty = False
         self.size_lock = threading.Lock()
         self.sizes_dirty = False
+        self.plex = None
+        if cfg.plex_url and cfg.plex_token:
+            self.plex = PlexNotifier(cfg)
+            threading.Thread(target=self._plex_check, daemon=True).start()
         self.prefetcher = None
         if cfg.prefetch:
             if self.cache.enabled():
@@ -2145,6 +2276,28 @@ class XtreamFS(fuse.Operations):
                 log.error("Web page failed to start: %s", e)
 
     # ---- web page support ------------------------------------------------
+
+    def _plex_check(self):
+        time.sleep(5)  # let the mount come up first
+        ok, msg = self.plex.check()
+        (log.info if ok else log.warning)(msg)
+        STATUS["plex"] = {"time": int(time.time()), "check": msg}
+
+    def _notify_plex(self, old, new):
+        try:
+            folders = changed_folders(old, new)
+        except Exception as e:
+            log.warning("Plex: couldn't work out the changed folders: %s", e)
+            return
+        if not folders:
+            log.info("Plex: nothing changed in the mount, no scan needed")
+            return
+        try:
+            res = self.plex.notify(folders)
+            STATUS["plex"] = res
+        except Exception as e:
+            log.warning("Plex: scan request failed: %s", scrub(e))
+            STATUS["plex"] = {"time": int(time.time()), "error": scrub(e)}
 
     def request_refresh(self):
         open(self.trigger_path, "w").close()
@@ -2506,8 +2659,11 @@ class XtreamFS(fuse.Operations):
                                          self.cfg.overrides, self.cfg.movie_layout,
                                          self.cfg.series_layout)
                 with self.tree_lock:
-                    self.tree = tree
+                    old_tree, self.tree = self.tree, tree
                 self.catalog, self.state = catalog, state
+                if self.plex and old_tree.files:
+                    threading.Thread(target=self._notify_plex, args=(old_tree, tree),
+                                     daemon=True).start()
                 set_phase("saving")
                 self._save_json(self.catalog_path, catalog)
                 self._save_json(self.state_path, state)

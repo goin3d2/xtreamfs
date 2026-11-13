@@ -178,6 +178,10 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `CACHE_EDGE_MB` | `8` | How much of each file's start and end counts as cacheable |
 | `PREFETCH` | `0` | When a file is opened, fetch the start and end of this many following files in the same show in the background (0 turns it off; 5 is a good value during a first scan) |
 | `PREFETCH_HEAD_MB` | `3` | How much of each file's start to pre-fetch (at most `CACHE_EDGE_MB`) |
+| `PLEX_URL` | | Plex server address, e.g. `http://192.168.1.82:32400` (with `PLEX_TOKEN`, turns on scan requests after each refresh) |
+| `PLEX_TOKEN` | | Plex token (`PlexOnlineToken` in Plex's `Preferences.xml`) |
+| `PLEX_PATH` | mount point | The mount's path as Plex sees it, e.g. `/vod` |
+| `PLEX_SCAN_MAX` | `300` | More changed folders than this in one library: scan that library once instead |
 | `PREFETCH_TAIL_MB` | `1` | How much of each file's end to pre-fetch, where MKV and MP4 keep their index |
 
 ## Category subfolders
@@ -399,7 +403,17 @@ those titles.
   away whenever you change the categories (on the Categories tab, or in
   `.env` followed by a restart). To refresh now, press **Refresh now** on the
   Status tab or run `docker exec xtreamfs touch /config/refresh`. It starts
-  within about 10 seconds. Then scan the library in Plex.
+  within about 10 seconds. Then scan the library in Plex, or let xtreamfs do it
+  (below).
+- **Telling Plex what changed:** Plex's *Scan my library automatically* relies
+  on change notifications, which a FUSE mount never sends, so new titles only
+  show up after a scan. Set `PLEX_URL`, `PLEX_TOKEN` and `PLEX_PATH` (the mount's
+  path inside the Plex container, e.g. `/vod`) and, after each refresh, xtreamfs
+  asks Plex to scan just the folders that changed: a new episode's season
+  folder, a new show's or movie's folder, or a removed one. A library with more
+  than `PLEX_SCAN_MAX` changed folders gets one full scan instead. On start, the
+  log says which Plex libraries it found under `PLEX_PATH`. The token is
+  `PlexOnlineToken` in Plex's `Preferences.xml`; it's masked in the logs.
 - **Provider offline:** the last good catalog is kept in `config/catalog.json`,
   so the library stays in place, and playback works again once the provider is
   back.

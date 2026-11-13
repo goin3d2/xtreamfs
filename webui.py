@@ -88,13 +88,24 @@ FIELDS = [
      "At most the cached edge size."),
     ("PREFETCH_TAIL_MB", "Streaming", "Pre-fetch end of each file (MB)", "number", "1",
      "Where MKV and MP4 files keep their index."),
+    ("PLEX_URL", "Plex", "Plex server address", "text", "",
+     "e.g. http://192.168.1.82:32400. With a token, xtreamfs asks Plex to scan just the "
+     "folders each refresh changed (the mount can't notify Plex itself)."),
+    ("PLEX_TOKEN", "Plex", "Plex token", "secret", "",
+     "Your X-Plex-Token (Plex's Preferences.xml, PlexOnlineToken)."),
+    ("PLEX_PATH", "Plex", "Mount path in Plex", "text", "",
+     "Where Plex sees the mount, e.g. /vod. Blank means the same path as inside this container."),
+    ("PLEX_SCAN_MAX", "Plex", "Scan a whole library above (folders)", "number", "300",
+     "If one refresh changes more folders than this in a library, scan that library once instead."),
     ("LOG_LEVEL", "Streaming", "Log level", "choice:DEBUG,INFO,WARNING,ERROR", "INFO", ""),
 ]
 RESTART = {"MAX_STREAMS", "USER_AGENT", "CACHE_MB", "CACHE_EDGE_MB", "STATS_INTERVAL",
-           "PREFETCH", "PREFETCH_HEAD_MB", "PREFETCH_TAIL_MB"}
+           "PREFETCH", "PREFETCH_HEAD_MB", "PREFETCH_TAIL_MB",
+           "PLEX_URL", "PLEX_TOKEN", "PLEX_PATH", "PLEX_SCAN_MAX"}
 # Settings that only affect streaming through the Plex mount.
 MOUNT_ONLY = {"MAX_STREAMS", "REDIRECT_CACHE_MINUTES", "CACHE_MB", "CACHE_EDGE_MB",
-              "STATS_INTERVAL", "PREFETCH", "PREFETCH_HEAD_MB", "PREFETCH_TAIL_MB"}
+              "STATS_INTERVAL", "PREFETCH", "PREFETCH_HEAD_MB", "PREFETCH_TAIL_MB",
+              "PLEX_URL", "PLEX_TOKEN", "PLEX_PATH", "PLEX_SCAN_MAX"}
 CATEGORY_KEYS = {"MOVIE_CATEGORIES", "SERIES_CATEGORIES", "MOVIE_EXCLUDE", "SERIES_EXCLUDE",
                  "MOVIE_FOLDERS", "SERIES_FOLDERS"}
 
