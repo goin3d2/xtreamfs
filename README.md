@@ -74,7 +74,25 @@ The **Slave** setting matters. Without it, Plex sees an empty folder, especially
 if xtreamfs starts after Plex. After xtreamfs restarts, restart Plex too.
 
 **5. Create the libraries.** Add a Movies library pointing at `/xtream/Movies`
-and a TV Shows library pointing at `/xtream/TV`.
+and a TV Shows library pointing at `/xtream/TV`. Before the first scan, read
+[Keeping the provider happy](#keeping-the-provider-happy): the first scan of a
+big library takes a long time, and a few settings make it much lighter.
+
+**6. Let xtreamfs tell Plex about new titles (recommended).** Plex's *Scan my
+library automatically* never fires for a FUSE mount, so without this, new
+titles only appear after a manual or scheduled scan. Add to `.env`, or set them
+in the Plex section of the settings page:
+
+```
+PLEX_URL=http://<server>:32400
+PLEX_TOKEN=<your Plex token>
+PLEX_PATH=/xtream
+```
+
+`PLEX_PATH` is the Container Path from step 4. The token is `PlexOnlineToken`
+in Plex's `Preferences.xml`. Restart xtreamfs; the log then shows a line like
+`Plex: will scan changed folders in Movies (/xtream/Movies), TV Shows (/xtream/TV)`.
+After every refresh, xtreamfs asks Plex to scan just the folders that changed.
 
 ## Settings and status page
 
@@ -105,8 +123,11 @@ everything up from the page.
 Settings saved on the page go in `config/settings.json` (readable only by
 root, since it can hold the login) and take priority over `.env`; **Reset** on a setting goes back to the `.env` value. Most changes
 apply straight away. The ones marked *restart* (connection limit, user agent,
-cache sizes, stats interval) need `docker compose up -d`, followed by a Plex
-restart. Set `WEB_PASSWORD` to require a password, which is worth doing since
+cache sizes, stats interval, pre-fetch and the Plex settings) need xtreamfs to
+restart (`docker compose restart xtreamfs`), followed by a Plex restart so it
+sees the mount again. Don't restart xtreamfs while Plex is scanning: Plex can
+briefly see the files as missing, and with *Empty trash automatically after
+every scan* on, it may remove them. Set `WEB_PASSWORD` to require a password, which is worth doing since
 the page can change the login, or `WEB_PORT=0` to turn the page off.
 
 ## Keeping the provider happy
@@ -118,7 +139,12 @@ of stream requests. To keep the load down:
   preview thumbnails*, *Generate intro/credits markers*, and *Generate chapter
   thumbnails*. Also disable *Perform extensive media analysis during
   maintenance* under Settings → Scheduled Tasks.
-- **Add categories a few at a time** rather than all at once.
+- **Add categories a few at a time** rather than all at once. A first scan
+  runs at roughly 30–60 episodes a minute, so a 100,000-episode library takes
+  a day or two. Episodes appear in Plex as they're added.
+- **Saving library settings mid-scan can fail** with *Your changes could not be
+  saved*, because the scan keeps Plex's database busy. Cancel the scan, save,
+  then start it again; it keeps what it already added.
 - **Set `MAX_STREAMS`** to your plan's connection limit, minus any connections
   you need for live TV. While a scan is running and someone is watching, they
   share that limit.
@@ -178,11 +204,11 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `CACHE_EDGE_MB` | `8` | How much of each file's start and end counts as cacheable |
 | `PREFETCH` | `0` | When a file is opened, fetch the start and end of this many following files in the same show in the background (0 turns it off; 5 is a good value during a first scan) |
 | `PREFETCH_HEAD_MB` | `3` | How much of each file's start to pre-fetch (at most `CACHE_EDGE_MB`) |
-| `PLEX_URL` | | Plex server address, e.g. `http://192.168.1.82:32400` (with `PLEX_TOKEN`, turns on scan requests after each refresh) |
-| `PLEX_TOKEN` | | Plex token (`PlexOnlineToken` in Plex's `Preferences.xml`) |
-| `PLEX_PATH` | mount point | The mount's path as Plex sees it, e.g. `/vod` |
-| `PLEX_SCAN_MAX` | `300` | More changed folders than this in one library: scan that library once instead |
 | `PREFETCH_TAIL_MB` | `1` | How much of each file's end to pre-fetch, where MKV and MP4 keep their index |
+| `PLEX_URL` | | Plex server address, e.g. `http://<server>:32400`. With `PLEX_TOKEN`, xtreamfs asks Plex to scan the folders each refresh changed |
+| `PLEX_TOKEN` | | Plex token (`PlexOnlineToken` in Plex's `Preferences.xml`); masked in the logs |
+| `PLEX_PATH` | the mount point | The mount's path as Plex sees it, e.g. `/xtream` |
+| `PLEX_SCAN_MAX` | `300` | If one refresh changes more folders than this in a Plex library, scan that library once instead of folder by folder |
 
 ## Category subfolders
 
@@ -408,7 +434,7 @@ those titles.
 - **Telling Plex what changed:** Plex's *Scan my library automatically* relies
   on change notifications, which a FUSE mount never sends, so new titles only
   show up after a scan. Set `PLEX_URL`, `PLEX_TOKEN` and `PLEX_PATH` (the mount's
-  path inside the Plex container, e.g. `/vod`) and, after each refresh, xtreamfs
+  path inside the Plex container, e.g. `/xtream`) and, after each refresh, xtreamfs
   asks Plex to scan just the folders that changed: a new episode's season
   folder, a new show's or movie's folder, or a removed one. A library with more
   than `PLEX_SCAN_MAX` changed folders gets one full scan instead. On start, the
@@ -452,6 +478,20 @@ Provider, last 60s: 42 requests for 15 files | first byte avg 1.84s, p90 3.10s |
 
 - **Plex sees an empty folder:** check that the Plex path is set to Slave, then
   restart Plex.
+- **New titles don't appear in Plex:** a FUSE mount can't notify Plex, so set
+  up [step 6](#setup-on-unraid) (`PLEX_URL`, `PLEX_TOKEN`, `PLEX_PATH`), or turn
+  on *Scan my library periodically* in Plex. Titles added while a long scan was
+  already running are missed by that scan; run *Scan Library Files* once more.
+- **`Plex: can't reach …`** in the log: check `PLEX_URL` from inside the
+  container (`docker exec xtreamfs python3 -c "import requests;
+  print(requests.get('http://<server>:32400/identity').status_code)"`), and
+  the token.
+- **`Plex: connected, but no library uses a folder under …`:** `PLEX_PATH`
+  doesn't match the folders your Plex libraries use. Set it to the Container
+  Path the Plex template gives the mount.
+- **`HTTP 416` in the stats line:** the provider replaced some files with
+  smaller ones. xtreamfs corrects each size the first time it hits one (*file
+  sizes corrected*), so they stop on their own.
 - **`Transport endpoint is not connected` on the host:** xtreamfs stopped
   uncleanly. Run `fusermount -uz /path/to/xtreamfs/mount`, then
   `docker compose up -d`.

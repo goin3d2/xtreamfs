@@ -89,12 +89,12 @@ FIELDS = [
     ("PREFETCH_TAIL_MB", "Streaming", "Pre-fetch end of each file (MB)", "number", "1",
      "Where MKV and MP4 files keep their index."),
     ("PLEX_URL", "Plex", "Plex server address", "text", "",
-     "e.g. http://192.168.1.82:32400. With a token, xtreamfs asks Plex to scan just the "
+     "e.g. http://<server>:32400. With a token, xtreamfs asks Plex to scan just the "
      "folders each refresh changed (the mount can't notify Plex itself)."),
     ("PLEX_TOKEN", "Plex", "Plex token", "secret", "",
      "Your X-Plex-Token (Plex's Preferences.xml, PlexOnlineToken)."),
     ("PLEX_PATH", "Plex", "Mount path in Plex", "text", "",
-     "Where Plex sees the mount, e.g. /vod. Blank means the same path as inside this container."),
+     "Where Plex sees the mount (the Container Path in the Plex template), e.g. /xtream. Blank means the same path as inside this container."),
     ("PLEX_SCAN_MAX", "Plex", "Scan a whole library above (folders)", "number", "300",
      "If one refresh changes more folders than this in a library, scan that library once instead."),
     ("LOG_LEVEL", "Streaming", "Log level", "choice:DEBUG,INFO,WARNING,ERROR", "INFO", ""),

@@ -222,7 +222,7 @@ class Config:
         # (a FUSE mount sends no change notifications). Off unless both are set.
         self.plex_url = (env("PLEX_URL", "") or "").strip().rstrip("/")
         self.plex_token = (env("PLEX_TOKEN", "") or "").strip()
-        # How Plex sees the mount (its path inside the Plex container), e.g. /vod.
+        # How Plex sees the mount (its path inside the Plex container), e.g. /xtream.
         self.plex_path = (env("PLEX_PATH", "") or "").strip().rstrip("/") or \
             self.mount.rstrip("/")
         # More changed folders than this in one library: scan the whole library instead.
