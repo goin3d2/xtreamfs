@@ -149,7 +149,8 @@ of stream requests. To keep the load down:
   you need for live TV. While a scan is running and someone is watching, they
   share that limit.
 - **A second account for the mount.** If you have two accounts on the same
-  provider, set `MOUNT_USER` and `MOUNT_PASS` (in `.env`) to the second one.
+  provider, enter the second one under *Second account for the mount* on the
+  Account page (or set `MOUNT_USER` and `MOUNT_PASS` in `.env`).
   Plex then streams on that account, and the catalog and the `.strm` files keep
   the main one, so Plex scans and Emby playback no longer share one connection
   limit. Switching the mount's account never rewrites a `.strm` file. Set
@@ -199,7 +200,7 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `THEME_RETRY_DAYS` | `30` | Days before a show with no theme is looked up again |
 | `SHRINK_GUARD_PERCENT` | `25` | Keep the previous catalog if a refresh would remove more than this share of movies or shows (0 turns it off) |
 | `MAX_STREAMS` | `1` | Most connections to the provider at once |
-| `MOUNT_USER`, `MOUNT_PASS` | empty | Second account on the same provider for streaming through the mount; the catalog and `.strm` files keep `XTREAM_USER`. `.env` only |
+| `MOUNT_USER`, `MOUNT_PASS` | empty | Second account on the same provider for streaming through the mount; the catalog and `.strm` files keep `XTREAM_USER`. Also on the Account page |
 | `REFRESH_HOURS` | `12` | How often to re-read the catalog |
 | `STRIP_PREFIX` | `1` | Remove tags like `EN - ` and `\|EN\|` from titles |
 | `API_DELAY` | `0.3` | Seconds between catalog API calls |

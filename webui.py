@@ -215,6 +215,9 @@ def start(fs, port, password=""):
                 if u.path == "/api/account":
                     fresh = (q.get("fresh") or ["0"])[0] == "1"
                     return self._send(200, fs.account(fresh))
+                if u.path == "/api/mount-account":
+                    fresh = (q.get("fresh") or ["0"])[0] == "1"
+                    return self._send(200, {"account": fs.mount_account(fresh)})
                 if u.path == "/api/categories":
                     live = (q.get("live") or ["0"])[0] == "1"
                     return self._send(200, fs.categories_view(live))
@@ -235,6 +238,15 @@ def start(fs, port, password=""):
                     return self._send(200, {"ok": True})
                 if u.path == "/api/settings":
                     return self._send(200, fs.save_settings(validate(self._body())))
+                if u.path in ("/api/mount-login/test", "/api/mount-login"):
+                    b = self._body()
+                    user = str(b.get("user") or "")
+                    pw = str(b.get("password") or "") or fs.cfg.mount_password
+                    if u.path == "/api/mount-login/test":
+                        if not user.strip():
+                            return self._send(200, {"ok": False, "error": "Enter the second account's username."})
+                        return self._send(200, fs.check_login(fs.cfg.url, user, pw))
+                    return self._send(200, fs.save_mount_login(user, pw, bool(b.get("force")), bool(b.get("clear"))))
                 if u.path in ("/api/login/test", "/api/login"):
                     b = self._body()
                     url, user = str(b.get("url") or ""), str(b.get("user") or "")

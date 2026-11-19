@@ -223,6 +223,23 @@ input[type=checkbox]{accent-color:var(--marquee);width:16px;height:16px}
       <span id="lnote"></span>
     </div>
   </div>
+  <div class="card" id="mountcard" style="margin-top:16px">
+    <h2>Second account for the mount</h2>
+    <p class="muted" style="margin:0 0 6px">Optional. A second account on the same provider that Plex streams on through the mount, so Plex has its own connections. The catalog and the .strm files keep the login above, so saving or changing this never rewrites a .strm file. It takes effect at once. Max provider connections (on Settings) then applies to this account.</p>
+    <div id="mstate" class="muted" style="margin:6px 0 4px"></div>
+    <div class="field"><label for="muser">Username</label>
+      <input type="text" id="muser" autocomplete="off" spellcheck="false">
+      <div class="help" id="musersrc"></div></div>
+    <div class="field"><label for="mpass">Password</label>
+      <input type="password" id="mpass" autocomplete="new-password">
+      <div class="help" id="mpasssrc"></div></div>
+    <div class="row" style="margin-top:16px">
+      <button class="btn" id="mtest">Test connection</button>
+      <button class="btn primary" id="msave">Save</button>
+      <button class="btn" id="mclear">Use the main account</button>
+      <span id="mnote"></span>
+    </div>
+  </div>
 </section>
 
 <section id="log">
@@ -405,7 +422,7 @@ $("#setsave").onclick=async()=>{
 async function resetField(name){try{await post("/api/settings",{[name]:null});toast("Back to the .env value.");loadSettings()}catch(e){toast(e.message)}}
 
 /* account */
-let maxStreams=null,mountOn=true,acct=null;
+let maxStreams=null,mountOn=true,acct=null,mountAcct=false;
 function goTab(t){document.querySelector(`nav button[data-tab=${t}]`).click()}
 function day(t){return t?new Date(t*1000).toLocaleDateString([], {year:"numeric",month:"short",day:"numeric"}):"–"}
 async function loadAccount(fresh){
@@ -419,7 +436,14 @@ async function loadAccount(fresh){
     const src=k=>({page:"Saved on this page.",env:"From .env.",none:"Not set."})[l.sources[k]];
     $("#lurlsrc").textContent="Include the port if your provider gives one. "+src("XTREAM_URL");
     $("#lusersrc").textContent=src("XTREAM_USER");$("#lpasssrc").textContent=src("XTREAM_PASS");
-    renderAccount(a);
+    mountAcct=!!l.mount_user;renderAccount(a);
+    $("#mountcard").style.display=mountOn===false?"none":"";
+    if(document.activeElement!==$("#muser"))$("#muser").value=l.mount_user||"";
+    $("#mpass").placeholder=l.mount_password_set?"Saved. Leave blank to keep it.":"";
+    $("#musersrc").textContent=src("MOUNT_USER");$("#mpasssrc").textContent=src("MOUNT_PASS");
+    if(!l.mount_user){$("#mstate").textContent="Not set: the mount streams on the main account."}
+    else{try{const m=(await api("/api/mount-account"+(fresh?"?fresh=1":""))).account;
+      $("#mstate").textContent=!m?"":m.ok?`In use for the mount: ${m.status||"Active"}${m.max_connections?`, ${fmtN(m.active_connections??0)} of ${fmtN(m.max_connections)} connections in use`:""}${m.expires?`, expires ${day(m.expires)}`:""}.`:`Set, but not working: ${m.error}`}catch(e){$("#mstate").textContent=e.message}}
   }catch(e){$("#acctstate").textContent="Unavailable";$("#acctdetail").textContent=e.message}
 }
 function renderAccount(a){
@@ -431,7 +455,7 @@ function renderAccount(a){
     ["Expires",a.expires?day(a.expires):"Never",days==null?"no end date":(days<0?"expired":`${days} day${days===1?"":"s"} left`)],
     ["Connections",a.max_connections==null?"–":`${fmtN(a.active_connections??0)} of ${fmtN(a.max_connections)}`,"in use now, across all your devices"],
     mountOn===false?["Plex mount","Off","Emby plays from the provider directly, so all connections are yours to use"]:
-    ["xtreamfs uses up to",maxStreams==null?"–":fmtN(maxStreams),a.max_connections&&maxStreams?(maxStreams>=a.max_connections?"your whole plan: none left for other devices":`leaving ${a.max_connections-maxStreams} for Emby, live TV and others`):"Max provider connections, on Settings"],
+    ["xtreamfs uses up to",maxStreams==null?"–":fmtN(maxStreams),mountAcct?"on the second account (below), so this account's connections are all left for Emby and others":a.max_connections&&maxStreams?(maxStreams>=a.max_connections?"your whole plan: none left for other devices":`leaving ${a.max_connections-maxStreams} for Emby, live TV and others`):"Max provider connections, on Settings"],
   ];
   $("#acctgrid").innerHTML=cards.map(([h,b,m])=>`<div class="card"><h2>${h}</h2><div class="big">${esc(b)}</div><div class="muted" style="font-size:12px">${esc(m)}</div></div>`).join("");
 }
@@ -445,6 +469,18 @@ $("#lsave").onclick=async()=>{note("Testing and saving…",true);try{
   if(!r.saved){if(!confirm(`The test failed: ${r.error}\n\nSave this login anyway?`)){note(r.error,false);return}
     r=await post("/api/login",Object.assign(loginBody(),{force:true}))}
   $("#lpass").value="";note(r.refresh?"Saved. A refresh starts within about 10 seconds.":"Saved. The login didn't change.",true);toast(r.refresh?"Login saved. Refreshing the catalog.":"Login saved.");loadAccount(false)}catch(e){note(e.message,false)}};
+
+function mnote(msg,ok){const n=$("#mnote");n.textContent=msg;n.className=ok?"ok":"bad"}
+function mountBody(){return{user:$("#muser").value.trim(),password:$("#mpass").value}}
+$("#mtest").onclick=async()=>{mnote("Testing…",true);try{const r=await post("/api/mount-login/test",mountBody());
+  mnote(r.ok?`Login works: ${r.status||"Active"} account${r.max_connections?`, ${r.max_connections} connections`:""}.`:r.error,r.ok)}catch(e){mnote(e.message,false)}};
+$("#msave").onclick=async()=>{mnote("Testing and saving…",true);try{
+  let r=await post("/api/mount-login",mountBody());
+  if(!r.saved){if(r.error&&r.error.startsWith("That's the main")||!confirm(`The test failed: ${r.error}\n\nSave this account anyway?`)){mnote(r.error,false);return}
+    r=await post("/api/mount-login",Object.assign(mountBody(),{force:true}))}
+  $("#mpass").value="";mnote(r.changed?"Saved. The mount now streams on this account.":"Saved. Nothing changed.",true);toast("Mount account saved.");loadAccount(true)}catch(e){mnote(e.message,false)}};
+$("#mclear").onclick=async()=>{if(!confirm("Stream through the mount on the main account again?"))return;mnote("Saving…",true);try{
+  await post("/api/mount-login",{clear:true});$("#muser").value="";$("#mpass").value="";mnote("Cleared. The mount streams on the main account.",true);loadAccount(true)}catch(e){mnote(e.message,false)}};
 
 /* polling */
 async function tick(){await Promise.all([loadStatus(),loadLog()])}

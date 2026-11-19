@@ -58,7 +58,7 @@ EDITABLE = {
 }
 # The provider login can also be saved from the page (its own section, never
 # shown back), so a first start can be set up entirely from the browser.
-CREDENTIALS = {"XTREAM_URL", "XTREAM_USER", "XTREAM_PASS"}
+CREDENTIALS = {"XTREAM_URL", "XTREAM_USER", "XTREAM_PASS", "MOUNT_USER", "MOUNT_PASS"}
 SETTINGS = {}
 
 
@@ -148,8 +148,8 @@ class Config:
         # Optional second account on the same provider, used only for streaming through the mount
         # (Plex). The catalog and the .strm files keep using XTREAM_USER, so switching the mount to
         # another account doesn't rewrite any .strm file. Each account has its own connection limit.
-        self.mount_user = (os.environ.get("MOUNT_USER", "") or "").strip()
-        self.mount_password = os.environ.get("MOUNT_PASS", "") or ""
+        self.mount_user = (env("MOUNT_USER", "") or "").strip()
+        self.mount_password = env("MOUNT_PASS", "") or ""
         self.mount = env("MOUNT_POINT", "/mnt/xtream")
         # MOUNT=0 skips the FUSE mount (for Emby/Jellyfin only): xtreamfs then
         # just keeps the .strm copy up to date.
@@ -2365,7 +2365,58 @@ class XtreamFS(fuse.Operations):
             return "page" if k in SETTINGS else ("env" if os.environ.get(k) else "none")
         return {"url": self.cfg.url, "user": self.cfg.user,
                 "password_set": bool(self.cfg.password),
+                "mount_user": self.cfg.mount_user,
+                "mount_password_set": bool(self.cfg.mount_password),
                 "sources": {k: source(k) for k in sorted(CREDENTIALS)}}
+
+    def mount_account(self, fresh=False):
+        """The mount account's details (when one is set), cached for 10 minutes."""
+        c = self.cfg
+        if not (c.mount_user and c.mount_password):
+            return None
+        cached = getattr(self, "_mount_account", None)
+        if cached and not fresh and time.time() - cached["checked"] < 600 and cached.get("user") == c.mount_user:
+            return cached
+        res = dict(self.check_login(c.url, c.mount_user, c.mount_password), user=c.mount_user)
+        res.setdefault("checked", int(time.time()))
+        self._mount_account = res
+        return res
+
+    def save_mount_login(self, user, password=None, force=False, clear=False):
+        """Test and save the second account used for streaming through the mount.
+        A blank password keeps the current one. Takes effect at once; .strm files don't change."""
+        user = (user or "").strip()
+        if clear or not user:
+            result = {"ok": True}
+            user, password = "", ""
+        else:
+            if user == self.cfg.user:
+                return {"ok": False, "saved": False,
+                        "error": "That's the main account. Enter a different account, or clear this to use the main one."}
+            password = password or self.cfg.mount_password
+            result = self.check_login(self.cfg.url, user, password)
+            if not result["ok"] and not force:
+                return dict(result, saved=False)
+        load_settings()
+        data = {k: v for k, v in SETTINGS.items() if k not in ("MOUNT_USER", "MOUNT_PASS")}
+        if user:
+            data.update(MOUNT_USER=user, MOUNT_PASS=password)
+        elif os.environ.get("MOUNT_USER") or os.environ.get("MOUNT_PASS"):
+            data.update(MOUNT_USER="", MOUNT_PASS="")  # override .env with "none"
+        tmp = settings_path() + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=1, sort_keys=True)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, settings_path())
+        load_settings()
+        changed = (user, password) != (self.cfg.mount_user, self.cfg.mount_password)
+        self.cfg.mount_user, self.cfg.mount_password = user, password
+        if changed:
+            self.resolved.clear()  # remembered stream links belong to the previous account
+            self._mount_account = None
+            log.info("Mount account %s from the web page; streams now use %s",
+                     "set" if user else "cleared", "the second account" if user else "the main account")
+        return dict(result, saved=True, changed=changed)
 
     def save_login(self, url, user, password=None, force=False):
         """Test and save a provider login. A blank password keeps the current one."""
