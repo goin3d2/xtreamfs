@@ -209,10 +209,6 @@ class Config:
         self.theme_retry_days = max(1.0, float(env("THEME_RETRY_DAYS", "30")))
         self.shrink_guard_min = int(env("SHRINK_GUARD_MIN", "50"))  # ignore tiny libraries
         self.max_streams = max(1, int(env("MAX_STREAMS", "1")))
-        # Reads through the mount skip Linux's page cache. A scan streams gigabytes a minute through
-        # the mount, and caching it there pushes everything else out of memory (folder listings of
-        # other disks, other apps). xtreamfs keeps its own cache of the parts read more than once.
-        self.page_cache = os.environ.get("MOUNT_PAGE_CACHE", "0") == "1"
         self.user_agent = env("USER_AGENT", "VLC/3.0.20 LibVLC/3.0.20")
         self.strip_prefix = env("STRIP_PREFIX", "1") == "1"
         self.api_delay = float(env("API_DELAY", "0.3"))
@@ -3017,11 +3013,8 @@ def main():
         else:
             log.info("Streaming through the mount with the second provider account (MOUNT_USER); "
                      ".strm files keep the main account")
-    if cfg.page_cache:
-        log.info("Mount reads use Linux's page cache (MOUNT_PAGE_CACHE=1)")
     fuse.FUSE(XtreamFS(cfg), cfg.mount, foreground=True, nothreads=False,
-              allow_other=True, ro=True, attr_timeout=300, entry_timeout=300,
-              **({} if cfg.page_cache else {"direct_io": True}))
+              allow_other=True, ro=True, attr_timeout=300, entry_timeout=300)
 
 
 if __name__ == "__main__":
