@@ -145,6 +145,11 @@ class Config:
         self.url = (env("XTREAM_URL", "") or "").strip().rstrip("/")
         self.user = (env("XTREAM_USER", "") or "").strip()
         self.password = env("XTREAM_PASS", "") or ""
+        # Optional second account on the same provider, used only for streaming through the mount
+        # (Plex). The catalog and the .strm files keep using XTREAM_USER, so switching the mount to
+        # another account doesn't rewrite any .strm file. Each account has its own connection limit.
+        self.mount_user = (os.environ.get("MOUNT_USER", "") or "").strip()
+        self.mount_password = os.environ.get("MOUNT_PASS", "") or ""
         self.mount = env("MOUNT_POINT", "/mnt/xtream")
         # MOUNT=0 skips the FUSE mount (for Emby/Jellyfin only): xtreamfs then
         # just keeps the .strm copy up to date.
@@ -2733,6 +2738,17 @@ class XtreamFS(fuse.Operations):
         size, _ = self._probe_size(entry)
         return size
 
+    def stream_url(self, entry):
+        """The provider URL the mount streams from: the entry's own, or the same title on the
+        mount account when MOUNT_USER / MOUNT_PASS are set."""
+        c = self.cfg
+        if not (c.mount_user and c.mount_password):
+            return entry.url
+        old = f"/{c.user}/{c.password}/"
+        if old not in entry.url:
+            return entry.url
+        return entry.url.replace(old, f"/{c.mount_user}/{c.mount_password}/", 1)
+
     def fetch(self, entry, byte_range, timeout):
         """GET a byte range of a title from the provider.
 
@@ -2758,7 +2774,7 @@ class XtreamFS(fuse.Operations):
             self.resolved.pop(entry.key, None)
         t0 = time.time()
         try:
-            r = self.http.get(entry.url, stream=True, timeout=timeout, headers=headers)
+            r = self.http.get(self.stream_url(entry), stream=True, timeout=timeout, headers=headers)
         except requests.RequestException as e:
             self.stats.error(entry.key, type(e).__name__)
             raise
@@ -2917,7 +2933,7 @@ def main():
     logging.getLogger().addHandler(RING)
     cfg = Config()
     for h in logging.getLogger().handlers:
-        h.addFilter(Redact([cfg.user, cfg.password]))
+        h.addFilter(Redact([cfg.user, cfg.password, cfg.mount_user, cfg.mount_password]))
     if SETTINGS:
         log.info("Settings saved from the web page override .env for: %s",
                  ", ".join(sorted(SETTINGS)))
@@ -2938,6 +2954,14 @@ def main():
     os.makedirs(cfg.mount, exist_ok=True)
     log.info("Mounting at %s (max %d provider connections)",
              cfg.mount, cfg.max_streams)
+    if cfg.mount_user or cfg.mount_password:
+        if not (cfg.mount_user and cfg.mount_password):
+            log.warning("MOUNT_USER and MOUNT_PASS both need setting; streaming with the main account")
+        elif cfg.mount_user == cfg.user:
+            log.info("MOUNT_USER is the main account; nothing changes")
+        else:
+            log.info("Streaming through the mount with the second provider account (MOUNT_USER); "
+                     ".strm files keep the main account")
     fuse.FUSE(XtreamFS(cfg), cfg.mount, foreground=True, nothreads=False,
               allow_other=True, ro=True, attr_timeout=300, entry_timeout=300)
 
