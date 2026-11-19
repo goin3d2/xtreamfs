@@ -200,6 +200,7 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `THEME_RETRY_DAYS` | `30` | Days before a show with no theme is looked up again |
 | `SHRINK_GUARD_PERCENT` | `25` | Keep the previous catalog if a refresh would remove more than this share of movies or shows (0 turns it off) |
 | `MAX_STREAMS` | `1` | Most connections to the provider at once |
+| `MOUNT_PAGE_CACHE` | `0` | `1` lets Linux cache video read through the mount. Off by default: a scan streams gigabytes a minute, and caching it pushes folder listings and other apps out of memory. xtreamfs keeps its own cache either way |
 | `MOUNT_USER`, `MOUNT_PASS` | empty | Second account on the same provider for streaming through the mount; the catalog and `.strm` files keep `XTREAM_USER`. Also on the Account page |
 | `REFRESH_HOURS` | `12` | How often to re-read the catalog |
 | `STRIP_PREFIX` | `1` | Remove tags like `EN - ` and `\|EN\|` from titles |
