@@ -315,6 +315,7 @@ async function loadStatus(){
     ["Catalog",c.fetched?ago(c.fetched,now):"–",s.last&&s.last.result==="ok"?`last refresh took ${dur(s.last.seconds)}`:""],
     [".strm copy",st?(st.running?"Writing…":(st.error?"Failed":fmtN(st.files))):(d.strm_dir?"–":"Off"),st&&!st.running&&!st.error?`${fmtN(st.written)} written, ${fmtN(st.removed)} removed ${ago(st.time,now)}`:(st&&st.error?esc(st.error):"")],
     ...(d.mount?[["Provider",s.provider?ago(s.provider.time,now):"quiet",s.provider?esc(s.provider.msg.replace(/^Provider, last \d+s: /,"")):"No streaming activity reported yet"]]:[["Mode",".strm only","The Plex mount is turned off (MOUNT=0)"]]),
+    ["Provider connections",conns?(conns.max?`${fmtN(conns.active)} of ${fmtN(conns.max)}`:fmtN(conns.active)):"–",connsNote(now)],
     ["Refused titles",fmtN(d.unavailable),"hidden for now, checked again later"],
     ...(s.themes?[["Theme songs",fmtN(s.themes.found),`${fmtN(s.themes.none)} not on Plex, ${fmtN(s.themes.noid)} without a TVDB id`]]:[]),
   ];
@@ -327,6 +328,15 @@ async function loadStatus(){
   // changes
   if(s.changes&&s.changes.length)$("#changes").innerHTML=s.changes.slice().reverse().map(x=>`<div><b>${clock(x.time)}</b> ${x.kind}: ${x.added.length?"added "+esc(x.added.join(", ")):""}${x.added.length&&x.removed.length?"; ":""}${x.removed.length?"removed "+esc(x.removed.join(", ")):""}</div>`).join("");
 }
+let conns=null,connsAt=0;
+function connsNote(now){
+  if(!conns)return"checking the provider…";
+  const p=[];
+  if(conns.main)p.push(`main ${fmtN(conns.main.active)} of ${fmtN(conns.main.max??0)}`);else p.push("main account not reachable");
+  if(conns.mount_set)p.push(conns.mount?`second (mount) ${fmtN(conns.mount.active)} of ${fmtN(conns.mount.max??0)}`:"second account not reachable");
+  return `in use now: ${p.join(", ")} · checked ${ago(conns.checked,now)}`;
+}
+async function loadConns(){if(Date.now()-connsAt<60000)return;connsAt=Date.now();try{conns=await api("/api/connections")}catch(e){}}
 function lastText(l,now){
   if(l.result==="ok")return`Last refresh ${ago(l.time,now)}: ${fmtN(l.shows)} shows, ${fmtN(l.movies)} movies`;
   if(l.result==="kept previous")return`Last refresh ${ago(l.time,now)} was held back by the shrink guard`;
@@ -483,7 +493,7 @@ $("#mclear").onclick=async()=>{if(!confirm("Stream through the mount on the main
   await post("/api/mount-login",{clear:true});$("#muser").value="";$("#mpass").value="";mnote("Cleared. The mount streams on the main account.",true);loadAccount(true)}catch(e){mnote(e.message,false)}};
 
 /* polling */
-async function tick(){await Promise.all([loadStatus(),loadLog()])}
+async function tick(){loadConns();await Promise.all([loadStatus(),loadLog()])}
 tick();setInterval(tick,2000);
 </script>
 </body>

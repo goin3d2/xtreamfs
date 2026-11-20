@@ -2382,6 +2382,25 @@ class XtreamFS(fuse.Operations):
         self._mount_account = res
         return res
 
+    def connections(self):
+        """Connections in use on each provider account and in total, checked at most once a minute."""
+        cached = getattr(self, "_connections", None)
+        if cached and time.time() - cached["checked"] < 60:
+            return cached
+        def part(acct):
+            if not acct or not acct.get("ok"):
+                return None
+            return {"active": acct.get("active_connections") or 0, "max": acct.get("max_connections")}
+        main = part(self.account(fresh=True)) if self.cfg.has_login() else None
+        second = part(self.mount_account(fresh=True))
+        parts = [x for x in (main, second) if x]
+        res = {"main": main, "mount": second, "mount_set": bool(self.cfg.mount_user and self.cfg.mount_password),
+               "active": sum(x["active"] for x in parts),
+               "max": sum(x["max"] for x in parts) if parts and all(x["max"] for x in parts) else None,
+               "checked": int(time.time())}
+        self._connections = res
+        return res
+
     def save_mount_login(self, user, password=None, force=False, clear=False):
         """Test and save the second account used for streaming through the mount.
         A blank password keeps the current one. Takes effect at once; .strm files don't change."""

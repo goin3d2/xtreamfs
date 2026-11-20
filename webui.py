@@ -215,6 +215,8 @@ def start(fs, port, password=""):
                 if u.path == "/api/account":
                     fresh = (q.get("fresh") or ["0"])[0] == "1"
                     return self._send(200, fs.account(fresh))
+                if u.path == "/api/connections":
+                    return self._send(200, fs.connections())
                 if u.path == "/api/mount-account":
                     fresh = (q.get("fresh") or ["0"])[0] == "1"
                     return self._send(200, {"account": fs.mount_account(fresh)})
