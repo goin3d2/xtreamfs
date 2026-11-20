@@ -154,7 +154,10 @@ of stream requests. To keep the load down:
   Plex then streams on that account, and the catalog and the `.strm` files keep
   the main one, so Plex scans and Emby playback no longer share one connection
   limit. Switching the mount's account never rewrites a `.strm` file. Set
-  `MAX_STREAMS` to the second account's limit.
+  `MAX_STREAMS` to the second account's limit. If the provider refuses the second account a
+  title (its package may leave some categories out, adult content often), that
+  title streams on the main account instead; the log's provider line counts
+  these.
 - **File sizes are looked up once** with a 1-byte request and cached in
   `config/sizes.json`, so restarts and rescans don't repeat it. If the provider
   later replaces a file with a smaller one, the first read past its new end

@@ -1069,6 +1069,7 @@ class Stats:
         self.prefetched = self.resized = 0
         self.mem_reads = 0
         self.unavailable = 0
+        self.fallbacks = set()
         self.error_kinds = collections.Counter()
         self.bytes = 0
         self.ttfb = []
@@ -1128,6 +1129,8 @@ class Stats:
                 msg += " | %d files pre-fetched" % self.prefetched
             if self.resized:
                 msg += " | %d file sizes corrected" % self.resized
+            if self.fallbacks:
+                msg += " | %d files on the main account (refused for the mount account)" % len(self.fallbacks)
             if self.error_kinds:
                 msg += " (" + ", ".join(f"{k} x{v}" for k, v in
                                        self.error_kinds.most_common(4)) + ")"
@@ -2212,6 +2215,9 @@ class XtreamFS(fuse.Operations):
         self.stats = Stats()
         self.cache = EdgeCache(cfg.cache_mb * 2**20, cfg.cache_edge_mb * 2**20)
         self.resolved = {}  # entry key -> (final URL after redirects, time resolved)
+        # Titles the mount's second account is refused for (its package may leave some categories
+        # out): entry key -> time. These stream on the main account instead, for a day.
+        self.main_only = {}
         self.tree = Tree()
         self.tree_lock = threading.Lock()
         self.handles = {}
@@ -2432,6 +2438,7 @@ class XtreamFS(fuse.Operations):
         self.cfg.mount_user, self.cfg.mount_password = user, password
         if changed:
             self.resolved.clear()  # remembered stream links belong to the previous account
+            self.main_only.clear()
             self._mount_account = None
             log.info("Mount account %s from the web page; streams now use %s",
                      "set" if user else "cleared", "the second account" if user else "the main account")
@@ -2842,9 +2849,23 @@ class XtreamFS(fuse.Operations):
             except requests.RequestException:
                 pass
             self.resolved.pop(entry.key, None)
+        url = self.stream_url(entry)
+        if url != entry.url and time.time() - self.main_only.get(entry.key, 0) < 86400:
+            url = entry.url
         t0 = time.time()
         try:
-            r = self.http.get(self.stream_url(entry), stream=True, timeout=timeout, headers=headers)
+            r = self.http.get(url, stream=True, timeout=timeout, headers=headers)
+            if r.status_code in UNAVAILABLE and url != entry.url:
+                # The second account is refused this title: use the main account for it.
+                r.close()
+                if entry.key not in self.main_only:
+                    log.debug("%s: refused for the mount account (HTTP %s); using the main account",
+                              entry.key, r.status_code)
+                self.main_only[entry.key] = time.time()
+                with self.stats.lock:
+                    self.stats.fallbacks.add(entry.key)
+                t0 = time.time()
+                r = self.http.get(entry.url, stream=True, timeout=timeout, headers=headers)
         except requests.RequestException as e:
             self.stats.error(entry.key, type(e).__name__)
             raise
@@ -2866,6 +2887,9 @@ class XtreamFS(fuse.Operations):
             for k, (_, t) in list(self.resolved.items()):
                 if t < cutoff:
                     self.resolved.pop(k, None)
+            for k, t in list(self.main_only.items()):
+                if time.time() - t > 86400:
+                    self.main_only.pop(k, None)
 
     def _probe_size(self, entry):
         """Find the file size with a 1-byte range request (HEAD is often unsupported).
