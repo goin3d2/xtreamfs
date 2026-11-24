@@ -1680,12 +1680,16 @@ class EmbyNotifier:
         u = self.cfg.emby_url
         return u + ("" if u.endswith("/emby") else "/emby") + endpoint
 
-    def locations(self):
-        """{library name: [folders]} for every Emby library."""
+    def libraries(self):
+        """[(name, item id, [folders])] for every Emby library."""
         r = self.s.get(self._url("/Library/VirtualFolders"), timeout=30)
         r.raise_for_status()
-        return {lib.get("Name", ""): [loc.rstrip("/") for loc in lib.get("Locations") or []]
-                for lib in r.json()}
+        return [(lib.get("Name", ""), str(lib.get("ItemId") or ""),
+                 [loc.rstrip("/") for loc in lib.get("Locations") or []]) for lib in r.json()]
+
+    def locations(self):
+        """{library name: [folders]} for every Emby library."""
+        return {n: locs for n, _, locs in self.libraries()}
 
     def check(self):
         """Log which Emby libraries use the .strm folder. Returns (ok, message)."""
@@ -1702,31 +1706,88 @@ class EmbyNotifier:
         return True, "Emby: will report changed folders in " + ", ".join(
             f"{n} ({', '.join(ls)})" for n, ls in sorted(mine.items()))
 
+    def _children(self, parent_id):
+        """{path: item id} of a folder's direct sub-folders in Emby."""
+        r = self.s.get(self._url("/Items"), params={
+            "ParentId": parent_id, "IsFolder": "true", "Recursive": "false",
+            "Fields": "Path", "EnableImages": "false", "EnableUserData": "false"}, timeout=120)
+        r.raise_for_status()
+        return {(i.get("Path") or "").rstrip("/"): str(i["Id"])
+                for i in r.json().get("Items") or [] if i.get("Path")}
+
+    def _validate(self, item_id):
+        """Have Emby look for new and removed items directly in this folder, without
+        re-checking everything below it."""
+        r = self.s.post(self._url(f"/Items/{item_id}/Refresh"), params={
+            "Recursive": "false", "MetadataRefreshMode": "ValidationOnly",
+            "ImageRefreshMode": "ValidationOnly", "ReplaceAllMetadata": "false",
+            "ReplaceAllImages": "false"}, timeout=60)
+        r.raise_for_status()
+
     def notify(self, changes):
-        """changes: {relative folder: "Created" | "Modified" | "Deleted"}. Returns a summary."""
+        """changes: {relative folder: "Created" | "Modified" | "Deleted"}. Returns a summary.
+
+        A folder Emby already knows (a season, or a movie that changed) is reported as
+        changed, and Emby refreshes just that folder. A folder that's new or gone isn't:
+        Emby would refresh the nearest folder it knows instead, recursively, which for a
+        new movie means re-checking every movie in its category (hours, for a big one).
+        For those, xtreamfs asks Emby to look only directly inside the parent folder.
+        """
         with self.lock:
-            locs = [l for ls in self.locations().values() for l in ls]
-            updates, outside = [], 0
+            libs = self.libraries()
+            updates, parents, outside = [], {}, 0
             for rel, kind in sorted(changes.items()):
                 path = self.base + "/" + rel.strip("/")
-                if any(path == l or path.startswith(l + "/") for l in locs):
+                lib = next(((lid, locs) for _, lid, locs in libs
+                            if any(path == l or path.startswith(l + "/") for l in locs)), None)
+                if not lib:
+                    outside += 1
+                elif kind == "Modified":
                     updates.append({"Path": path, "UpdateType": kind})
                 else:
-                    outside += 1
+                    parents.setdefault(os.path.dirname(path), (lib, kind))
+            known = {}   # folder path -> Emby item id, for library roots and their sub-folders
+            for _, lid, locs in libs:
+                for l in locs:
+                    known[l] = lid
+            validated, fallback = 0, []
+            looked = set()
+            for parent, ((lid, locs), kind) in sorted(parents.items()):
+                if parent not in known and lid not in looked:
+                    looked.add(lid)
+                    try:
+                        known.update(self._children(lid))
+                    except Exception as e:
+                        log.debug("Emby: couldn't list library %s: %s", lid, scrub(e))
+                item = known.get(parent)
+                if item:
+                    self._validate(item)
+                    validated += 1
+                    time.sleep(0.2)
+                else:
+                    fallback.append(parent)   # deeper than a library's top folders: report the change
+            for parent in fallback:
+                kind = parents[parent][1]
+                for rel, k in changes.items():
+                    path = self.base + "/" + rel.strip("/")
+                    if os.path.dirname(path) == parent and k == kind:
+                        updates.append({"Path": path, "UpdateType": k})
             for i in range(0, len(updates), self.BATCH):
                 r = self.s.post(self._url("/Library/Media/Updated"),
                                 json={"Updates": updates[i:i + self.BATCH]}, timeout=60)
                 r.raise_for_status()
                 time.sleep(0.5)
             counts = collections.Counter(u["UpdateType"] for u in updates)
-            if updates:
-                log.info("Emby: reported %d changed folder%s (%s)", len(updates),
-                         "" if len(updates) == 1 else "s",
-                         ", ".join(f"{v} {k.lower()}" for k, v in sorted(counts.items())))
+            new_gone = sum(1 for k in changes.values() if k != "Modified")
+            if updates or validated:
+                log.info("Emby: %d changed folder%s reported%s; %d folder%s checked for new or removed "
+                         "titles (%d added or removed)", len(updates), "" if len(updates) == 1 else "s",
+                         (" (" + ", ".join(f"{v} {k.lower()}" for k, v in sorted(counts.items())) + ")")
+                         if updates else "", validated, "" if validated == 1 else "s", new_gone)
             if outside:
                 log.debug("Emby: %d changed folders aren't in any Emby library", outside)
-            return {"time": int(time.time()), "folders": len(updates), "outside": outside,
-                    **{k.lower(): v for k, v in counts.items()}}
+            return {"time": int(time.time()), "folders": len(updates) + validated,
+                    "reported": len(updates), "checked": validated, "outside": outside}
 
 
 # --------------------------------------------------------------------------
