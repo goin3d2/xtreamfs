@@ -1709,7 +1709,7 @@ class EmbyNotifier:
     def _children(self, parent_id):
         """{path: item id} of a folder's direct sub-folders in Emby."""
         r = self.s.get(self._url("/Items"), params={
-            "ParentId": parent_id, "IsFolder": "true", "Recursive": "false",
+            "ParentId": parent_id, "IncludeItemTypes": "Folder,Series", "Recursive": "false",
             "Fields": "Path", "EnableImages": "false", "EnableUserData": "false"}, timeout=120)
         r.raise_for_status()
         return {(i.get("Path") or "").rstrip("/"): str(i["Id"])
