@@ -97,11 +97,18 @@ FIELDS = [
      "Where Plex sees the mount (the Container Path in the Plex template), e.g. /xtream. Blank means the same path as inside this container."),
     ("PLEX_SCAN_MAX", "Plex", "Scan a whole library above (folders)", "number", "300",
      "If one refresh changes more folders than this in a library, scan that library once instead."),
+    ("EMBY_URL", "Emby", "Emby server address", "text", "",
+     "e.g. http://<server>:8096. With an API key, xtreamfs tells Emby which .strm folders each "
+     "refresh changed, so they show up without a full library scan."),
+    ("EMBY_KEY", "Emby", "Emby API key", "secret", "",
+     "From Emby's Dashboard → Advanced → API Keys."),
+    ("EMBY_PATH", "Emby", ".strm folder path in Emby", "text", "",
+     "Where Emby sees the .strm folder (the Container Path in the Emby template), e.g. /vod. Blank means the same path as here."),
     ("LOG_LEVEL", "Streaming", "Log level", "choice:DEBUG,INFO,WARNING,ERROR", "INFO", ""),
 ]
 RESTART = {"MAX_STREAMS", "USER_AGENT", "CACHE_MB", "CACHE_EDGE_MB", "STATS_INTERVAL",
            "PREFETCH", "PREFETCH_HEAD_MB", "PREFETCH_TAIL_MB",
-           "PLEX_URL", "PLEX_TOKEN", "PLEX_PATH", "PLEX_SCAN_MAX"}
+           "PLEX_URL", "PLEX_TOKEN", "PLEX_PATH", "PLEX_SCAN_MAX", "EMBY_URL", "EMBY_KEY", "EMBY_PATH"}
 # Settings that only affect streaming through the Plex mount.
 MOUNT_ONLY = {"MAX_STREAMS", "REDIRECT_CACHE_MINUTES", "CACHE_MB", "CACHE_EDGE_MB",
               "STATS_INTERVAL", "PREFETCH", "PREFETCH_HEAD_MB", "PREFETCH_TAIL_MB",

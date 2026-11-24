@@ -220,6 +220,9 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `PLEX_TOKEN` | | Plex token (`PlexOnlineToken` in Plex's `Preferences.xml`); masked in the logs |
 | `PLEX_PATH` | the mount point | The mount's path as Plex sees it, e.g. `/xtream` |
 | `PLEX_SCAN_MAX` | `300` | If one refresh changes more folders than this in a Plex library, scan that library once instead of folder by folder |
+| `EMBY_URL` | | Emby (or Jellyfin) server address, e.g. `http://<server>:8096`. With `EMBY_KEY`, xtreamfs tells Emby which `.strm` folders each sync added, changed or removed, so they appear without a full library scan |
+| `EMBY_KEY` | | An Emby API key (Dashboard → Advanced → API Keys); masked in the logs |
+| `EMBY_PATH` | `STRM_DIR` | The `.strm` folder's path as Emby sees it, e.g. `/vod` |
 
 ## Category subfolders
 

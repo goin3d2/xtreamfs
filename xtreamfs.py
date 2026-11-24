@@ -55,6 +55,7 @@ EDITABLE = {
     "MAX_STREAMS", "USER_AGENT", "CACHE_MB", "CACHE_EDGE_MB", "STATS_INTERVAL",
     "PREFETCH", "PREFETCH_HEAD_MB", "PREFETCH_TAIL_MB", "LOG_LEVEL",
     "PLEX_URL", "PLEX_TOKEN", "PLEX_PATH", "PLEX_SCAN_MAX",
+    "EMBY_URL", "EMBY_KEY", "EMBY_PATH",
 }
 # The provider login can also be saved from the page (its own section, never
 # shown back), so a first start can be set up entirely from the browser.
@@ -234,6 +235,14 @@ class Config:
         self.plex_scan_max = max(1, int(float(env("PLEX_SCAN_MAX", "300") or 300)))
         if len(self.plex_token) >= 3 and self.plex_token not in SECRETS:
             SECRETS.append(self.plex_token)
+        # Tell Emby (or Jellyfin) which .strm folders each sync changed, so it picks them up
+        # without a full library scan. Off unless both are set.
+        self.emby_url = (env("EMBY_URL", "") or "").strip().rstrip("/")
+        self.emby_key = (env("EMBY_KEY", "") or "").strip()
+        # How Emby sees the .strm folder (its path inside the Emby container), e.g. /vod.
+        self.emby_path = (env("EMBY_PATH", "") or "").strip().rstrip("/")
+        if len(self.emby_key) >= 3 and self.emby_key not in SECRETS:
+            SECRETS.append(self.emby_key)
 
     @staticmethod
     def _list(s):
@@ -1650,6 +1659,76 @@ class PlexNotifier:
                     "libraries": sorted(t for _, t in by_section), "outside": outside}
 
 
+class EmbyNotifier:
+    """Tells Emby which .strm folders a sync changed (Library/Media/Updated), so it
+    checks just those instead of waiting for a full library scan, which can take
+    hours on a big library. Libraries with real-time monitoring would notice by
+    themselves; this covers the ones without it.
+    """
+
+    BATCH = 100
+
+    def __init__(self, cfg, strm_root):
+        self.cfg = cfg
+        self.root = strm_root
+        self.base = cfg.emby_path or strm_root.rstrip("/")
+        self.s = requests.Session()
+        self.s.headers.update({"X-Emby-Token": cfg.emby_key, "Accept": "application/json"})
+        self.lock = threading.Lock()
+
+    def _url(self, endpoint):
+        u = self.cfg.emby_url
+        return u + ("" if u.endswith("/emby") else "/emby") + endpoint
+
+    def locations(self):
+        """{library name: [folders]} for every Emby library."""
+        r = self.s.get(self._url("/Library/VirtualFolders"), timeout=30)
+        r.raise_for_status()
+        return {lib.get("Name", ""): [loc.rstrip("/") for loc in lib.get("Locations") or []]
+                for lib in r.json()}
+
+    def check(self):
+        """Log which Emby libraries use the .strm folder. Returns (ok, message)."""
+        try:
+            libs = self.locations()
+        except Exception as e:
+            return False, f"Emby: can't reach {self.cfg.emby_url}: {scrub(e)}"
+        mine = {n: [l for l in locs if l == self.base or l.startswith(self.base + "/")]
+                for n, locs in libs.items()}
+        mine = {n: ls for n, ls in mine.items() if ls}
+        if not mine:
+            return True, (f"Emby: connected, but no library uses a folder under {self.base}. "
+                          "Check EMBY_PATH (the .strm folder's path as Emby sees it).")
+        return True, "Emby: will report changed folders in " + ", ".join(
+            f"{n} ({', '.join(ls)})" for n, ls in sorted(mine.items()))
+
+    def notify(self, changes):
+        """changes: {relative folder: "Created" | "Modified" | "Deleted"}. Returns a summary."""
+        with self.lock:
+            locs = [l for ls in self.locations().values() for l in ls]
+            updates, outside = [], 0
+            for rel, kind in sorted(changes.items()):
+                path = self.base + "/" + rel.strip("/")
+                if any(path == l or path.startswith(l + "/") for l in locs):
+                    updates.append({"Path": path, "UpdateType": kind})
+                else:
+                    outside += 1
+            for i in range(0, len(updates), self.BATCH):
+                r = self.s.post(self._url("/Library/Media/Updated"),
+                                json={"Updates": updates[i:i + self.BATCH]}, timeout=60)
+                r.raise_for_status()
+                time.sleep(0.5)
+            counts = collections.Counter(u["UpdateType"] for u in updates)
+            if updates:
+                log.info("Emby: reported %d changed folder%s (%s)", len(updates),
+                         "" if len(updates) == 1 else "s",
+                         ", ".join(f"{v} {k.lower()}" for k, v in sorted(counts.items())))
+            if outside:
+                log.debug("Emby: %d changed folders aren't in any Emby library", outside)
+            return {"time": int(time.time()), "folders": len(updates), "outside": outside,
+                    **{k.lower(): v for k, v in counts.items()}}
+
+
 # --------------------------------------------------------------------------
 # Filesystem
 # --------------------------------------------------------------------------
@@ -2001,6 +2080,7 @@ class StrmWriter:
         self.user_agent = user_agent
         self.themes = themes                # ThemeFinder, or None when SERIES_THEMES is off
         self._again = None  # a sync requested while one was running
+        self.on_change = None  # called with {relative folder: "Created"/"Modified"/"Deleted"} after a sync
         self.manifest_path = os.path.join(cache_dir, "strm_manifest.json")
         self.lock = threading.Lock()
 
@@ -2032,6 +2112,13 @@ class StrmWriter:
             old = self._load()
             want = {}       # relative path -> manifest value (URL, or "nfo:<hash>")
             written = removed = nfos = 0
+            changes = {}    # relative folder -> "Created" / "Modified" / "Deleted"
+
+            def note_dir(rel_dir, created):
+                if created:
+                    changes[rel_dir] = "Created"
+                else:
+                    changes.setdefault(rel_dir, "Modified")
 
             def put(rel, text, tag, mtime):
                 """Write `text` to `rel` unless the manifest says it's already there."""
@@ -2040,6 +2127,12 @@ class StrmWriter:
                 full = os.path.join(self.root, rel)
                 if old.get(rel) == tag and os.path.exists(full):
                     return
+                # The highest folder this creates (a new show or movie) is what Emby needs to hear about.
+                d = os.path.dirname(rel)
+                top = None
+                while d and not os.path.isdir(os.path.join(self.root, d)):
+                    top, d = d, os.path.dirname(d)
+                note_dir(top or os.path.dirname(rel), top is not None)
                 os.makedirs(os.path.dirname(full), exist_ok=True)
                 tmp = full + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as f:
@@ -2121,15 +2214,30 @@ class StrmWriter:
                     except FileNotFoundError:
                         pass
                     d = os.path.dirname(os.path.join(self.root, rel))
+                    gone = None
                     while d.startswith(self.root) and d != self.root:
                         try:
                             os.rmdir(d)  # only succeeds once the folder is empty
                         except OSError:
                             break
-                        d = os.path.dirname(d)
+                        gone, d = d, os.path.dirname(d)
+                    if gone:
+                        changes[os.path.relpath(gone, self.root)] = "Deleted"
+                    else:
+                        changes.setdefault(os.path.dirname(rel), "Modified")
             self._save(want)
             log.info("STRM: %d files in %s, %d of them .nfo (%d written, %d removed) in %.0fs",
                      len(want), self.root, nfos, written, removed, time.time() - t0)
+            if changes and self.on_change and old:
+                # A folder inside one that's also reported needn't be reported separately.
+                keep = {}
+                for f in sorted(changes, key=len):
+                    p = f
+                    while p and p not in keep:
+                        p = os.path.dirname(p)
+                    if not p:
+                        keep[f] = changes[f]
+                threading.Thread(target=self.on_change, args=(keep,), daemon=True).start()
             images = self._download_art(downloads, want) if downloads and download else 0
             themes = self.themes.fetch(theme_jobs, want, self.root, self._save) \
                 if theme_jobs and download else 0
@@ -2257,6 +2365,11 @@ class XtreamFS(fuse.Operations):
                                 cfg.movie_artwork, cfg.user_agent,
                                 themes=ThemeFinder(cfg) if cfg.series_themes else None)
                      if cfg.strm_dir else None)
+        self.emby = None
+        if self.strm and cfg.emby_url and cfg.emby_key:
+            self.emby = EmbyNotifier(cfg, cfg.strm_dir)
+            self.strm.on_change = self._notify_emby
+            threading.Thread(target=self._emby_check, daemon=True).start()
         self.state_path = os.path.join(cfg.cache_dir, "state.json")
         self.state = self._load_json(self.state_path, {})
         catalog = self._load_json(self.catalog_path, None)
@@ -2293,6 +2406,18 @@ class XtreamFS(fuse.Operations):
         ok, msg = self.plex.check()
         (log.info if ok else log.warning)(msg)
         STATUS["plex"] = {"time": int(time.time()), "check": msg}
+
+    def _emby_check(self):
+        ok, msg = self.emby.check()
+        (log.info if ok else log.warning)(msg)
+        STATUS["emby"] = {"time": int(time.time()), "check": msg}
+
+    def _notify_emby(self, changes):
+        try:
+            STATUS["emby"] = self.emby.notify(changes)
+        except Exception as e:
+            log.warning("Emby: couldn't report the changed folders: %s", scrub(e))
+            STATUS["emby"] = {"time": int(time.time()), "error": scrub(e)}
 
     def _notify_plex(self, old, new):
         try:
