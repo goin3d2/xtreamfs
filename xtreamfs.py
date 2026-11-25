@@ -1746,10 +1746,14 @@ class EmbyNotifier:
                     updates.append({"Path": path, "UpdateType": kind})
                 else:
                     parents.setdefault(os.path.dirname(path), (lib, kind))
-            known = {}   # folder path -> Emby item id, for library roots and their sub-folders
-            for _, lid, locs in libs:
-                for l in locs:
-                    known[l] = lid
+            # A new or removed folder right at the top of a library (a new show in TV) is left to Emby: asking
+            # Emby to look at a whole library makes it re-check everything in it, even when told not to go deeper.
+            # Libraries with real-time monitoring pick these up by themselves; the others at the library scan.
+            roots = {l for _, _, locs in libs for l in locs}
+            at_root = [p for p in parents if p in roots]
+            for p in at_root:
+                del parents[p]
+            known = {}   # folder path -> Emby item id, for a library's top folders
             validated, fallback = 0, []
             looked = set()
             for parent, ((lid, locs), kind) in sorted(parents.items()):
@@ -1784,6 +1788,9 @@ class EmbyNotifier:
                          "titles (%d added or removed)", len(updates), "" if len(updates) == 1 else "s",
                          (" (" + ", ".join(f"{v} {k.lower()}" for k, v in sorted(counts.items())) + ")")
                          if updates else "", validated, "" if validated == 1 else "s", new_gone)
+            if at_root:
+                log.info("Emby: %d new or removed title%s directly in a library folder left to Emby's own "
+                         "monitoring or library scan", len(at_root), "" if len(at_root) == 1 else "s")
             if outside:
                 log.debug("Emby: %d changed folders aren't in any Emby library", outside)
             return {"time": int(time.time()), "folders": len(updates) + validated,
