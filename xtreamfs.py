@@ -55,7 +55,7 @@ EDITABLE = {
     "MAX_STREAMS", "USER_AGENT", "CACHE_MB", "CACHE_EDGE_MB", "STATS_INTERVAL",
     "PREFETCH", "PREFETCH_HEAD_MB", "PREFETCH_TAIL_MB", "LOG_LEVEL",
     "PLEX_URL", "PLEX_TOKEN", "PLEX_PATH", "PLEX_SCAN_MAX",
-    "EMBY_URL", "EMBY_KEY", "EMBY_PATH",
+    "EMBY_URL", "EMBY_KEY", "EMBY_PATH", "POSTEROVERLAY_URL", "POSTEROVERLAY_SERVER",
 }
 # The provider login can also be saved from the page (its own section, never
 # shown back), so a first start can be set up entirely from the browser.
@@ -243,6 +243,11 @@ class Config:
         self.emby_path = (env("EMBY_PATH", "") or "").strip().rstrip("/")
         if len(self.emby_key) >= 3 and self.emby_key not in SECRETS:
             SECRETS.append(self.emby_key)
+        # posteroverlay (poster overlays and missing artwork): asked for a run after each sync that added
+        # titles, so new ones get their poster within minutes instead of at its next scheduled run.
+        self.posteroverlay_url = (env("POSTEROVERLAY_URL", "") or "").strip().rstrip("/")
+        # Its server id for Emby (blank: every server set up in posteroverlay).
+        self.posteroverlay_server = (env("POSTEROVERLAY_SERVER", "") or "").strip()
 
     @staticmethod
     def _list(s):
@@ -2436,8 +2441,9 @@ class XtreamFS(fuse.Operations):
         self.emby = None
         if self.strm and cfg.emby_url and cfg.emby_key:
             self.emby = EmbyNotifier(cfg, cfg.strm_dir)
-            self.strm.on_change = self._notify_emby
             threading.Thread(target=self._emby_check, daemon=True).start()
+        if self.strm and (self.emby or cfg.posteroverlay_url):
+            self.strm.on_change = self._after_sync
         self.state_path = os.path.join(cfg.cache_dir, "state.json")
         self.state = self._load_json(self.state_path, {})
         catalog = self._load_json(self.catalog_path, None)
@@ -2479,6 +2485,34 @@ class XtreamFS(fuse.Operations):
         ok, msg = self.emby.check()
         (log.info if ok else log.warning)(msg)
         STATUS["emby"] = {"time": int(time.time()), "check": msg}
+
+    # Emby adds new titles in the background after it's told about them; give it this long before
+    # posteroverlay lists them.
+    POSTEROVERLAY_DELAY = 120
+
+    def _after_sync(self, changes):
+        if self.emby:
+            self._notify_emby(changes)
+        if self.cfg.posteroverlay_url and any(v == "Created" for v in changes.values()):
+            time.sleep(self.POSTEROVERLAY_DELAY)
+            self._start_posteroverlay()
+
+    def _start_posteroverlay(self):
+        url = self.cfg.posteroverlay_url + "/api/jobs/overlays"
+        params = {"server": self.cfg.posteroverlay_server} if self.cfg.posteroverlay_server else None
+        try:
+            r = requests.post(url, params=params, timeout=30)
+            r.raise_for_status()
+            started = bool((r.json() or {}).get("started"))
+        except Exception as e:
+            log.warning("posteroverlay: couldn't start a run for the new titles: %s", scrub(e))
+            STATUS["posteroverlay"] = {"time": int(time.time()), "error": scrub(e)}
+            return
+        if started:
+            log.info("posteroverlay: started a run for the new titles' posters")
+        else:
+            log.info("posteroverlay: a run is already going; the new titles are picked up by the next one")
+        STATUS["posteroverlay"] = {"time": int(time.time()), "started": started}
 
     def _notify_emby(self, changes):
         try:

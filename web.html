@@ -318,6 +318,7 @@ async function loadStatus(){
     ["Provider connections",conns?(conns.max?`${fmtN(conns.active)} of ${fmtN(conns.max)}`:fmtN(conns.active)):"–",connsNote(now)],
     ["Refused titles",fmtN(d.unavailable),"hidden for now, checked again later"],
     ...(s.emby?[["Emby",s.emby.error?"Failed":(s.emby.check?"Connected":fmtN(s.emby.folders||0)+" folders"),s.emby.error?esc(s.emby.error):(s.emby.check?esc(s.emby.check):`reported ${ago(s.emby.time,now)}`)]]:[]),
+    ...(s.posteroverlay?[["posteroverlay",s.posteroverlay.error?"Failed":(s.posteroverlay.started?"Run started":"Already running"),s.posteroverlay.error?esc(s.posteroverlay.error):`for new titles ${ago(s.posteroverlay.time,now)}`]]:[]),
     ...(s.themes?[["Theme songs",fmtN(s.themes.found),`${fmtN(s.themes.none)} not on Plex, ${fmtN(s.themes.noid)} without a TVDB id`]]:[]),
   ];
   $("#cards").innerHTML=cards.map(([h,b,m])=>`<div class="card"><h2>${h}</h2><div class="big">${b}</div><div class="muted" style="font-size:12px">${m}</div></div>`).join("");

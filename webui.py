@@ -104,11 +104,17 @@ FIELDS = [
      "From Emby's Dashboard → Advanced → API Keys."),
     ("EMBY_PATH", "Emby", ".strm folder path in Emby", "text", "",
      "Where Emby sees the .strm folder (the Container Path in the Emby template), e.g. /vod. Blank means the same path as here."),
+    ("POSTEROVERLAY_URL", "posteroverlay", "posteroverlay address", "text", "",
+     "e.g. http://<server>:8095. After a refresh that added titles, xtreamfs starts a posteroverlay run, "
+     "so new titles get their poster within minutes."),
+    ("POSTEROVERLAY_SERVER", "posteroverlay", "posteroverlay server id", "text", "",
+     "Which posteroverlay server to run (its id, from posteroverlay's Servers page). Blank means all of them."),
     ("LOG_LEVEL", "Streaming", "Log level", "choice:DEBUG,INFO,WARNING,ERROR", "INFO", ""),
 ]
 RESTART = {"MAX_STREAMS", "USER_AGENT", "CACHE_MB", "CACHE_EDGE_MB", "STATS_INTERVAL",
            "PREFETCH", "PREFETCH_HEAD_MB", "PREFETCH_TAIL_MB",
-           "PLEX_URL", "PLEX_TOKEN", "PLEX_PATH", "PLEX_SCAN_MAX", "EMBY_URL", "EMBY_KEY", "EMBY_PATH"}
+           "PLEX_URL", "PLEX_TOKEN", "PLEX_PATH", "PLEX_SCAN_MAX", "EMBY_URL", "EMBY_KEY", "EMBY_PATH",
+           "POSTEROVERLAY_URL", "POSTEROVERLAY_SERVER"}
 # Settings that only affect streaming through the Plex mount.
 MOUNT_ONLY = {"MAX_STREAMS", "REDIRECT_CACHE_MINUTES", "CACHE_MB", "CACHE_EDGE_MB",
               "STATS_INTERVAL", "PREFETCH", "PREFETCH_HEAD_MB", "PREFETCH_TAIL_MB",
