@@ -2442,7 +2442,8 @@ class XtreamFS(fuse.Operations):
         if self.strm and cfg.emby_url and cfg.emby_key:
             self.emby = EmbyNotifier(cfg, cfg.strm_dir)
             threading.Thread(target=self._emby_check, daemon=True).start()
-        if self.strm and (self.emby or cfg.posteroverlay_url):
+        if self.strm:
+            # Emby and posteroverlay are told about each sync's changes (posteroverlay can be set up later).
             self.strm.on_change = self._after_sync
         self.state_path = os.path.join(cfg.cache_dir, "state.json")
         self.state = self._load_json(self.state_path, {})
@@ -2756,7 +2757,8 @@ class XtreamFS(fuse.Operations):
            "series_folders", "overrides", "refresh_hours", "shrink_guard", "shrink_guard_min",
            "movie_layout", "series_layout", "strip_prefix", "api_delay", "strm_nfo",
            "strm_nfo_lock", "movie_details", "movie_details_skip", "movie_artwork", "unavailable_retry", "redirect_ttl",
-           "series_themes", "tmdb_key", "theme_lookups", "theme_retry_days")
+           "series_themes", "tmdb_key", "theme_lookups", "theme_retry_days",
+           "posteroverlay_url", "posteroverlay_server")
     # Changes to these start a .strm sync (no catalog refresh needed).
     THEME_SETTINGS = ("series_themes", "tmdb_key", "theme_lookups", "theme_retry_days")
     # Changes to these need a fresh catalog refresh to take effect.
