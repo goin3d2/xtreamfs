@@ -13,3 +13,4 @@ strm/
 # Python
 __pycache__/
 *.pyc
+fuse/

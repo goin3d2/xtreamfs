@@ -59,7 +59,7 @@ its own API call. You can follow it on the settings page at
 the host:
 
 ```bash
-ls /path/to/xtreamfs/mount/Movies | head
+ls /path/to/xtreamfs/fuse/vod/Movies | head
 ```
 
 **4. Give Plex access.** In the Plex template, add a Path:
@@ -67,14 +67,18 @@ ls /path/to/xtreamfs/mount/Movies | head
 | Field | Value |
 |---|---|
 | Container Path | `/xtream` |
-| Host Path | `/path/to/xtreamfs/mount` |
+| Host Path | `/path/to/xtreamfs/fuse` (the folder *above* the mount) |
 | Access Mode | **Read Only - Slave** |
 
-The **Slave** setting matters. Without it, Plex sees an empty folder, especially
-if xtreamfs starts after Plex. After xtreamfs restarts, restart Plex too.
+Map the folder above the mount, not the mount itself, and use **Slave**. A
+container attaches to whatever is mounted when it starts; when xtreamfs
+restarts, its mount is replaced, and a container that mapped the mount itself
+keeps the old, dead one until it's restarted too. Mapping the parent with Slave
+lets the new mount appear inside the container by itself. Emby or Jellyfin
+playing from the mount are set up the same way.
 
-**5. Create the libraries.** Add a Movies library pointing at `/xtream/Movies`
-and a TV Shows library pointing at `/xtream/TV`. Before the first scan, read
+**5. Create the libraries.** Add a Movies library pointing at `/xtream/vod/Movies`
+and a TV Shows library pointing at `/xtream/vod/TV`. Before the first scan, read
 [Keeping the provider happy](#keeping-the-provider-happy): the first scan of a
 big library takes a long time, and a few settings make it much lighter.
 
@@ -86,12 +90,12 @@ in the Plex section of the settings page:
 ```
 PLEX_URL=http://<server>:32400
 PLEX_TOKEN=<your Plex token>
-PLEX_PATH=/xtream
+PLEX_PATH=/xtream/vod
 ```
 
-`PLEX_PATH` is the Container Path from step 4. The token is `PlexOnlineToken`
+`PLEX_PATH` is the mount as Plex sees it: the Container Path from step 4 plus `/vod`. The token is `PlexOnlineToken`
 in Plex's `Preferences.xml`. Restart xtreamfs; the log then shows a line like
-`Plex: will scan changed folders in Movies (/xtream/Movies), TV Shows (/xtream/TV)`.
+`Plex: will scan changed folders in Movies (/xtream/vod/Movies), TV Shows (/xtream/vod/TV)`.
 After every refresh, xtreamfs asks Plex to scan just the folders that changed.
 
 ## Settings and status page
@@ -228,7 +232,7 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `RECONNECT_TRIES` | `5` | When a provider connection drops mid-file, reconnect this many times (waiting 1, 2, 4, 8, 15 s) before giving up |
 | `PLEX_URL` | | Plex server address, e.g. `http://<server>:32400`. With `PLEX_TOKEN`, xtreamfs asks Plex to scan the folders each refresh changed |
 | `PLEX_TOKEN` | | Plex token (`PlexOnlineToken` in Plex's `Preferences.xml`); masked in the logs |
-| `PLEX_PATH` | the mount point | The mount's path as Plex sees it, e.g. `/xtream` |
+| `PLEX_PATH` | the mount point | The mount's path as Plex sees it, e.g. `/xtream/vod` |
 | `PLEX_SCAN_MAX` | `300` | If one refresh changes more folders than this in a Plex library, scan that library once instead of folder by folder |
 | `EMBY_URL` | | Emby (or Jellyfin) server address, e.g. `http://<server>:8096`. With `EMBY_KEY`, xtreamfs tells Emby which `.strm` folders each sync added, changed or removed, so they appear without a full library scan |
 | `EMBY_KEY` | | An Emby API key (Dashboard → Advanced → API Keys); masked in the logs |
@@ -520,7 +524,7 @@ Provider, last 60s: 42 requests for 15 files | first byte avg 1.84s, p90 3.10s |
   smaller ones. xtreamfs corrects each size the first time it hits one (*file
   sizes corrected*), so they stop on their own.
 - **`Transport endpoint is not connected` on the host:** xtreamfs stopped
-  uncleanly. Run `fusermount -uz /path/to/xtreamfs/mount`, then
+  uncleanly. Run `fusermount -uz /path/to/xtreamfs/fuse/vod`, then
   `docker compose up -d`.
 - **`Category … not found`:** the name or ID doesn't match. Use the IDs from
   `--list-categories`.

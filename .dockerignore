@@ -3,3 +3,4 @@ mount
 .env
 *.log
 strm
+fuse

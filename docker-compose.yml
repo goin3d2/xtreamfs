@@ -16,9 +16,11 @@ services:
       - ./config:/config
       # .strm copy of the library for Emby/Jellyfin (used when STRM_DIR=/strm).
       - ./strm:/strm
-      # The mount must propagate back to the host so Plex can see it.
+      # The mount must propagate back to the host so Plex and Emby can see it. It sits in a
+      # folder of its own (./fuse), so the media servers can map that parent folder and pick
+      # up the new mount by themselves after xtreamfs restarts.
       - type: bind
-        source: ./mount
+        source: ./fuse/vod
         target: /mnt/xtream
         bind:
           propagation: rshared
