@@ -54,6 +54,7 @@ EDITABLE = {
     "SERIES_THEMES", "TMDB_API_KEY", "THEME_LOOKUPS", "THEME_RETRY_DAYS",
     "MAX_STREAMS", "USER_AGENT", "CACHE_MB", "CACHE_EDGE_MB", "STATS_INTERVAL",
     "PREFETCH", "PREFETCH_HEAD_MB", "PREFETCH_TAIL_MB", "LOG_LEVEL",
+    "READ_AHEAD_MB", "READ_AHEAD_START_MB", "RECONNECT_TRIES",
     "PLEX_URL", "PLEX_TOKEN", "PLEX_PATH", "PLEX_SCAN_MAX",
     "EMBY_URL", "EMBY_KEY", "EMBY_PATH", "POSTEROVERLAY_URL", "POSTEROVERLAY_SERVER",
 }
@@ -224,6 +225,15 @@ class Config:
         self.prefetch = max(0, int(float(env("PREFETCH", "0") or 0)))
         self.prefetch_head_mb = max(0.0, float(env("PREFETCH_HEAD_MB", "3")))
         self.prefetch_tail_mb = max(0.0, float(env("PREFETCH_TAIL_MB", "1")))
+        # During playback, keep reading this far ahead of the player on the same
+        # provider connection, so a slow or dropped connection doesn't stall it (0 = off).
+        self.read_ahead_mb = max(0.0, float(env("READ_AHEAD_MB", "64") or 0))
+        # Only once a file has been read straight through this far, so scans and
+        # media analysis (short reads) don't download more than they need.
+        self.read_ahead_start_mb = max(0.0, float(env("READ_AHEAD_START_MB", "16") or 0))
+        # When a provider connection drops mid-file, reconnect this many times
+        # (waiting 1, 2, 4, 8, 15 s) before giving up.
+        self.reconnect_tries = max(0, int(float(env("RECONNECT_TRIES", "5") or 0)))
         # Tell Plex which folders changed after each refresh, so it scans just those
         # (a FUSE mount sends no change notifications). Off unless both are set.
         self.plex_url = (env("PLEX_URL", "") or "").strip().rstrip("/")
@@ -1069,6 +1079,12 @@ class ConnectionPool:
 
 NS = 1_000_000_000
 SKIP_FORWARD = 4 * 1024 * 1024  # read through small forward gaps instead of reconnecting
+STREAM_TIMEOUT = (15, 20)  # connect, and longest wait for the next bytes before reconnecting
+RECONNECT_DELAYS = (1, 2, 4, 8, 15)
+RA_CHUNK = 256 * 1024
+RA_KEEP_BEHIND = 2 * 1024 * 1024  # kept behind the player, for slightly out-of-order reads
+RA_IDLE = 30  # seconds paused with a full buffer before the connection is let go
+RA_WAIT = 60  # longest a read waits for the read-ahead to bring its bytes
 
 
 class Stats:
@@ -1082,6 +1098,7 @@ class Stats:
         self.requests = self.redirects = self.cache_hits = self.errors = 0
         self.prefetched = self.resized = 0
         self.mem_reads = 0
+        self.reconnects = 0
         self.unavailable = 0
         self.fallbacks = set()
         self.error_kinds = collections.Counter()
@@ -1122,6 +1139,10 @@ class Stats:
         with self.lock:
             self.mem_reads += 1
 
+    def reconnect(self):
+        with self.lock:
+            self.reconnects += 1
+
     def add_bytes(self, n):
         with self.lock:
             self.bytes += n
@@ -1139,6 +1160,8 @@ class Stats:
                 t[int(len(t) * 0.9) if len(t) > 1 else 0], self.redirects,
                 self.cache_hits, self.bytes / 2**20, self.errors, self.unavailable,
                 self.mem_reads)
+            if self.reconnects:
+                msg += " | %d dropped connections picked up again" % self.reconnects
             if self.prefetched:
                 msg += " | %d files pre-fetched" % self.prefetched
             if self.resized:
@@ -1261,11 +1284,37 @@ class Stream:
         self.resp = None
         self.pos = 0
         self.lock = threading.Lock()
-        self.busy = False
+        self._busy = False
+        self.ra = None  # ReadAhead while the file is playing
+        self.seq_end, self.seq_bytes = -1, 0  # how far the file has been read straight through
         # Bytes read since the last block boundary, collected for the edge cache.
         self.acc_pos = None
         self.acc = b""
         self.nxt = -1
+
+    @property
+    def busy(self):
+        # A read-ahead that's still going holds its connection; the pool mustn't take it.
+        ra = self.ra
+        return self._busy or (ra is not None and not ra.done)
+
+    @busy.setter
+    def busy(self, value):
+        self._busy = value
+
+    def _connect(self, pos):
+        """A new provider connection from `pos` on (this stream's pool slot is kept)."""
+        r = self.fs.fetch(self.entry, f"bytes={pos}-", STREAM_TIMEOUT)
+        if r.status_code != 206:
+            r.close()
+            raise OSError(EIO, f"HTTP {r.status_code} on reconnect")
+        return r
+
+    def _stop_read_ahead(self):
+        ra, self.ra = self.ra, None
+        if ra is not None:
+            ra.halt()
+        self.seq_bytes = 0
 
     def _close_locked_by_pool(self):
         r, self.resp = self.resp, None
@@ -1286,7 +1335,7 @@ class Stream:
         if self.fs.cache.enabled() and self.fs.cache.in_edge(offset, 1, self.size):
             start = offset - offset % BLOCK
         try:
-            r = self.fs.fetch(self.entry, f"bytes={start}-", (15, 60))
+            r = self.fs.fetch(self.entry, f"bytes={start}-", STREAM_TIMEOUT)
         except Exception:
             self.fs.pool.release(self)
             raise
@@ -1314,6 +1363,14 @@ class Stream:
         with self.lock:
             self.busy = True
             try:
+                if self.ra is not None:
+                    data = self.ra.take(offset, size)
+                    if data is not None:
+                        self.fs.pool.touch(self)
+                        return data
+                    # The player jumped outside the buffer (or it ran dry): carry on
+                    # with an ordinary connection from where it asked.
+                    self._stop_read_ahead()
                 if self.resp is not None and offset < self.pos:
                     # The kernel sometimes sends reads slightly out of order.
                     # If the stream already passed this range, it may be in
@@ -1343,6 +1400,7 @@ class Stream:
                     self._read_exact(offset - self.pos)
                 data = self._read_exact(size)
                 self.fs.pool.touch(self)
+                self._maybe_read_ahead(offset, len(data))
                 return data
             except OSError:
                 raise
@@ -1354,12 +1412,50 @@ class Stream:
             finally:
                 self.busy = False
 
+    def _maybe_read_ahead(self, offset, n):
+        """Start reading ahead once the file is being played (read straight through)."""
+        if offset == self.seq_end:
+            self.seq_bytes += n
+        else:
+            self.seq_bytes = n
+        self.seq_end = offset + n
+        cfg = self.fs.cfg
+        limit = int(cfg.read_ahead_mb * 2**20)
+        if (limit and self.resp is not None and self.pos == self.seq_end < self.size
+                and self.seq_bytes >= cfg.read_ahead_start_mb * 2**20):
+            resp, self.resp = self.resp, None
+            self.ra = ReadAhead(self, resp, self.pos, limit)
+
     def _read_exact(self, n):
-        chunks, got = [], 0
+        chunks, got, tries = [], 0, 0
         while got < n:
-            b = self.resp.raw.read(n - got)
+            err = None
+            try:
+                b = self.resp.raw.read(n - got) if self.resp is not None else b""
+            except Exception as e:
+                b, err = b"", e
             if not b:
-                break
+                at = self.pos + got
+                if self.resp is not None and at < self.size:
+                    self.resp.close()  # it's broken; don't read from it again
+                    self.resp = None
+                if at >= self.size:
+                    break
+                if tries >= self.fs.cfg.reconnect_tries:
+                    raise err or OSError(EIO, "provider connection lost")
+                # The connection dropped (or stalled) before the end: pick up where it stopped.
+                time.sleep(RECONNECT_DELAYS[min(tries, len(RECONNECT_DELAYS) - 1)])
+                tries += 1
+                try:
+                    r = self._connect(at)
+                except Exception as e:
+                    log.debug("Reconnect %d for %s at %d failed: %s", tries, self.entry.key, at, e)
+                    continue
+                self.resp = r
+                self.fs.stats.reconnect()
+                log.info("Provider connection for %s dropped at %.0f MB; picked up again",
+                         self.entry.key, at / 2**20)
+                continue
             chunks.append(b)
             got += len(b)
         data = b"".join(chunks)
@@ -1391,8 +1487,151 @@ class Stream:
 
     def close(self):
         with self.lock:
+            self._stop_read_ahead()
             self._close_locked_by_pool()
         self.fs.pool.release(self)
+
+
+class ReadAhead:
+    """Keeps reading a playing file ahead of the player, on the stream's own provider
+    connection, and reconnects by itself when that connection drops or stalls, so the
+    player reads from memory meanwhile. It lets the connection go when the player has
+    paused with a full buffer, or at the end of the file."""
+
+    def __init__(self, stream, resp, pos, limit):
+        self.s = stream
+        self.resp = resp
+        self.start = pos  # file offset of buf[0]
+        self.buf = bytearray()
+        self.cpos = pos  # where the player has read up to
+        self.limit = limit
+        self.cond = threading.Condition()
+        self.stopped = False
+        self.done = False  # the thread has finished (and let go of its connection)
+        self.failed = None
+        self.last_read = time.time()
+        threading.Thread(target=self._run, daemon=True, name="read-ahead").start()
+
+    @property
+    def end(self):
+        return self.start + len(self.buf)
+
+    def take(self, offset, size):
+        """The bytes at `offset`, waiting for them if they're on their way. None when
+        they're outside what this read-ahead holds or will soon bring."""
+        size = min(size, self.s.size - offset)
+        want = offset + size
+        deadline = time.time() + RA_WAIT
+        with self.cond:
+            if offset < self.start or offset > self.end + SKIP_FORWARD:
+                return None
+            self.cpos = max(self.cpos, offset)
+            self.last_read = time.time()
+            self.cond.notify_all()
+            while self.end < want and not self.done:
+                left = deadline - time.time()
+                if left <= 0:
+                    break
+                self.cond.wait(left)
+            if self.end < want:
+                return None
+            i = offset - self.start
+            data = bytes(self.buf[i:i + size])
+            self.cpos = max(self.cpos, want)
+            drop = self.cpos - RA_KEEP_BEHIND - self.start
+            if drop > 0:
+                del self.buf[:drop]
+                self.start += drop
+            self.cond.notify_all()
+        self.s.fs.stats.mem_read()
+        return data
+
+    def halt(self):
+        with self.cond:
+            self.stopped = True
+            r = self.resp
+            self.cond.notify_all()
+        if r is not None:
+            try:
+                r.close()  # wakes the thread if it's waiting on the provider
+            except Exception:
+                pass
+
+    def _run(self):
+        s, tries = self.s, 0
+        try:
+            while True:
+                with self.cond:
+                    while not self.stopped and self.end - self.cpos >= self.limit:
+                        if time.time() - self.last_read > RA_IDLE:
+                            return  # paused: let the connection go, keep the buffer
+                        self.cond.wait(1)
+                    if self.stopped:
+                        return
+                    pos = self.end
+                if pos >= s.size:
+                    return
+                err = None
+                try:
+                    b = self.resp.raw.read(min(RA_CHUNK, s.size - pos)) if self.resp is not None else b""
+                except Exception as e:
+                    b, err = b"", e
+                if self.stopped:
+                    return
+                if not b:
+                    with self.cond:
+                        old, self.resp = self.resp, None
+                    if old is not None:
+                        try:
+                            old.close()  # it's broken; don't read from it again
+                        except Exception:
+                            pass
+                    if tries >= s.fs.cfg.reconnect_tries:
+                        self.failed = err or "connection closed early"
+                        log.warning("Provider connection for %s dropped at %.0f MB and couldn't "
+                                    "be picked up again: %s", s.entry.key, pos / 2**20,
+                                    scrub(self.failed))
+                        return
+                    time.sleep(RECONNECT_DELAYS[min(tries, len(RECONNECT_DELAYS) - 1)])
+                    tries += 1
+                    if self.stopped:
+                        return
+                    try:
+                        r = s._connect(pos)
+                    except Exception as e:
+                        log.debug("Reconnect %d for %s at %d failed: %s", tries, s.entry.key, pos, e)
+                        continue
+                    with self.cond:
+                        if self.stopped:
+                            r.close()
+                            return
+                        self.resp = r
+                    s.fs.stats.reconnect()
+                    log.info("Provider connection for %s dropped at %.0f MB; picked up again "
+                             "(the player read from the buffer meanwhile)", s.entry.key, pos / 2**20)
+                    continue
+                tries = 0
+                s.fs.stats.add_bytes(len(b))
+                s._feed(pos, b)
+                with self.cond:
+                    self.buf += b
+                    self.cond.notify_all()
+        except Exception as e:
+            self.failed = e
+            log.warning("Read-ahead for %s stopped: %s", s.entry.key, scrub(e))
+        finally:
+            with self.cond:
+                r, self.resp = self.resp, None
+            if r is not None:
+                try:
+                    r.close()
+                except Exception:
+                    pass
+            if not self.stopped:
+                s.fs.pool.release(s)  # when halted, the stream sorts out its own slot
+            with self.cond:
+                self.done = True
+                self.cond.notify_all()
 
 
 class Prefetcher:
@@ -2758,7 +2997,8 @@ class XtreamFS(fuse.Operations):
            "movie_layout", "series_layout", "strip_prefix", "api_delay", "strm_nfo",
            "strm_nfo_lock", "movie_details", "movie_details_skip", "movie_artwork", "unavailable_retry", "redirect_ttl",
            "series_themes", "tmdb_key", "theme_lookups", "theme_retry_days",
-           "posteroverlay_url", "posteroverlay_server")
+           "posteroverlay_url", "posteroverlay_server",
+           "read_ahead_mb", "read_ahead_start_mb", "reconnect_tries")
     # Changes to these start a .strm sync (no catalog refresh needed).
     THEME_SETTINGS = ("series_themes", "tmdb_key", "theme_lookups", "theme_retry_days")
     # Changes to these need a fresh catalog refresh to take effect.

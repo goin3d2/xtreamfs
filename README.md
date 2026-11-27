@@ -216,6 +216,9 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `PREFETCH` | `0` | When a file is opened, fetch the start and end of this many following files in the same show in the background (0 turns it off; 5 is a good value during a first scan) |
 | `PREFETCH_HEAD_MB` | `3` | How much of each file's start to pre-fetch (at most `CACHE_EDGE_MB`) |
 | `PREFETCH_TAIL_MB` | `1` | How much of each file's end to pre-fetch, where MKV and MP4 keep their index |
+| `READ_AHEAD_MB` | `64` | While a file plays, keep this much downloaded ahead of the player on the same provider connection, so a slow or dropped connection doesn't stall playback (0 turns it off) |
+| `READ_AHEAD_START_MB` | `16` | Start reading ahead only once a file has been read straight through this far, so scans and media analysis don't download more than they need |
+| `RECONNECT_TRIES` | `5` | When a provider connection drops mid-file, reconnect this many times (waiting 1, 2, 4, 8, 15 s) before giving up |
 | `PLEX_URL` | | Plex server address, e.g. `http://<server>:32400`. With `PLEX_TOKEN`, xtreamfs asks Plex to scan the folders each refresh changed |
 | `PLEX_TOKEN` | | Plex token (`PlexOnlineToken` in Plex's `Preferences.xml`); masked in the logs |
 | `PLEX_PATH` | the mount point | The mount's path as Plex sees it, e.g. `/xtream` |

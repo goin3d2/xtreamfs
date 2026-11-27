@@ -80,6 +80,15 @@ FIELDS = [
      "How much of each file's start and end counts as cacheable."),
     ("STATS_INTERVAL", "Streaming", "Stats line every (seconds)", "number", "60",
      "0 turns the provider stats line off."),
+    ("READ_AHEAD_MB", "Streaming", "Read ahead during playback (MB)", "number", "64",
+     "While a file plays, keep this much downloaded ahead of the player on the same "
+     "connection, so a slow or dropped provider connection doesn't stall it. 0 = off."),
+    ("READ_AHEAD_START_MB", "Streaming", "Start reading ahead after (MB)", "number", "16",
+     "Only once a file has been read straight through this far, so scans and media "
+     "analysis don't download more than they need."),
+    ("RECONNECT_TRIES", "Streaming", "Reconnect attempts", "number", "5",
+     "When a provider connection drops mid-file, reconnect this many times "
+     "(waiting 1, 2, 4, 8, 15 s) before giving up."),
     ("PREFETCH", "Streaming", "Pre-fetch files ahead", "number", "0",
      "When a file is opened, fetch the start and end of this many following files in "
      "the same show, so Plex's analysis reads them from memory. 0 = off; 5 suits a "
@@ -116,6 +125,7 @@ RESTART = {"MAX_STREAMS", "USER_AGENT", "CACHE_MB", "CACHE_EDGE_MB", "STATS_INTE
            "PLEX_URL", "PLEX_TOKEN", "PLEX_PATH", "PLEX_SCAN_MAX", "EMBY_URL", "EMBY_KEY", "EMBY_PATH"}
 # Settings that only affect streaming through the Plex mount.
 MOUNT_ONLY = {"MAX_STREAMS", "REDIRECT_CACHE_MINUTES", "CACHE_MB", "CACHE_EDGE_MB",
+              "READ_AHEAD_MB", "READ_AHEAD_START_MB", "RECONNECT_TRIES",
               "STATS_INTERVAL", "PREFETCH", "PREFETCH_HEAD_MB", "PREFETCH_TAIL_MB",
               "PLEX_URL", "PLEX_TOKEN", "PLEX_PATH", "PLEX_SCAN_MAX"}
 CATEGORY_KEYS = {"MOVIE_CATEGORIES", "SERIES_CATEGORIES", "MOVIE_EXCLUDE", "SERIES_EXCLUDE",
