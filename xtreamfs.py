@@ -1038,6 +1038,7 @@ def fetch_movie_details(cfg: Config, catalog, cache, save, workers=2):
 LIMIT_REFUSED = (429, 458, 509)  # the provider refusing because the account is at its limit
 USAGE_CHECK = 30  # seconds between checks of each account's connections in use
 ACCOUNT_FULL_FOR = 60  # after the provider says an account is full, leave it alone this long
+IDLE_CLOSE = 15  # seconds without reads before an open file's provider connection is closed
 
 
 class ConnectionPool:
@@ -1054,6 +1055,7 @@ class ConnectionPool:
         self.provider_max = {}  # account -> the provider's connection limit
         self.outside = {}  # account -> connections in use outside xtreamfs
         self.full_until = {}  # account -> until when it's left alone
+        self.shed_until = {}  # account -> until when no more idle connections are closed for others
 
     @property
     def limit(self):
@@ -1116,6 +1118,7 @@ class ConnectionPool:
                     a = self._pick(allowed)
                     if a:
                         self.active[stream] = a
+                        stream.last_used = time.time()
                         return True
                 if self._evict(stream, allowed):
                     continue
@@ -1163,12 +1166,42 @@ class ConnectionPool:
             self.full_until[account] = time.time() + ACCOUNT_FULL_FOR
 
     def set_usage(self, account, in_use, provider_max):
-        """What the provider says is in use on an account; what isn't ours is someone else's."""
+        """What the provider says is in use on an account; what isn't ours is someone else's.
+        When that leaves the account over its limit, idle connections of ours make way."""
         with self.cond:
             if provider_max:
                 self.provider_max[account] = provider_max
             if in_use is not None:
                 self.outside[account] = max(0, in_use - self._ours(account))
+            freed = 0
+            # The provider takes a while to notice closed connections, so after making room
+            # give it a couple of checks before making more.
+            if time.time() >= self.shed_until.get(account, 0):
+                while self._room(account) < 0 and self._shed(account):
+                    freed += 1
+            if freed:
+                self.shed_until[account] = time.time() + 2 * USAGE_CHECK
+                log.info("Closed %d idle connection%s on the %s account to make room for other apps",
+                         freed, "" if freed == 1 else "s", account)
+            self.cond.notify_all()
+
+    def _shed(self, account):
+        for victim in list(self.active):
+            if self.active[victim] == account and not victim.busy:
+                victim._close_locked_by_pool()
+                self.active.pop(victim, None)
+                return True
+        return False
+
+    def close_idle(self, seconds=IDLE_CLOSE):
+        """Close connections that open files haven't read from for a while, so they're
+        free for other apps; the file reconnects when it's read again."""
+        now = time.time()
+        with self.cond:
+            for victim in list(self.active):
+                if not victim.busy and now - getattr(victim, "last_used", now) > seconds:
+                    victim._close_locked_by_pool()
+                    self.active.pop(victim, None)
             self.cond.notify_all()
 
     def view(self):
@@ -1181,6 +1214,7 @@ class ConnectionPool:
                                  for a in self.accounts()]}
 
     def touch(self, stream):
+        stream.last_used = time.time()
         with self.cond:
             if stream in self.active:
                 self.active.move_to_end(stream)
@@ -2816,6 +2850,7 @@ class XtreamFS(fuse.Operations):
         threading.Thread(target=self._save_sizes_loop, daemon=True).start()
         threading.Thread(target=self._stats_loop, daemon=True).start()
         threading.Thread(target=self._usage_loop, daemon=True).start()
+        threading.Thread(target=self._idle_loop, daemon=True).start()
         port = int(os.environ.get("WEB_PORT", "8099") or 0)
         if port:
             try:
@@ -3492,6 +3527,14 @@ class XtreamFS(fuse.Operations):
             except Exception as e:
                 log.debug("Connection check failed: %s", scrub(e))
             time.sleep(USAGE_CHECK)
+
+    def _idle_loop(self):
+        while True:
+            time.sleep(5)
+            try:
+                self.pool.close_idle()
+            except Exception as e:
+                log.debug("Idle check failed: %s", e)
 
     def _stats_loop(self):
         interval = self.cfg.stats_interval
