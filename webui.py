@@ -122,6 +122,9 @@ FIELDS = [
      "From Emby's Dashboard → Advanced → API Keys."),
     ("EMBY_PATH", "Emby", ".strm folder path in Emby", "text", "",
      "Where Emby sees the .strm folder (the Container Path in the Emby template), e.g. /vod. Blank means the same path as here."),
+    ("EMBY_MOUNT_PATH", "Emby", "Mount path in Emby", "text", "",
+     "For Emby libraries that play from the mount: the mount's path inside the Emby container, "
+     "e.g. /vodmount. xtreamfs then tells Emby what changed there after each refresh."),
     ("POSTEROVERLAY_URL", "posteroverlay", "posteroverlay address", "text", "",
      "e.g. http://<server>:8095. After a refresh that added titles, xtreamfs starts a posteroverlay run, "
      "so new titles get their poster within minutes."),

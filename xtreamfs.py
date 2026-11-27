@@ -57,7 +57,7 @@ EDITABLE = {
     "READ_AHEAD_MB", "READ_AHEAD_START_MB", "RECONNECT_TRIES",
     "MAIN_STREAMS", "MOUNT_STREAMS", "ACCOUNT_ORDER",
     "PLEX_URL", "PLEX_TOKEN", "PLEX_PATH", "PLEX_SCAN_MAX",
-    "EMBY_URL", "EMBY_KEY", "EMBY_PATH", "POSTEROVERLAY_URL", "POSTEROVERLAY_SERVER",
+    "EMBY_URL", "EMBY_KEY", "EMBY_PATH", "EMBY_MOUNT_PATH", "POSTEROVERLAY_URL", "POSTEROVERLAY_SERVER",
 }
 # The provider login can also be saved from the page (its own section, never
 # shown back), so a first start can be set up entirely from the browser.
@@ -257,6 +257,8 @@ class Config:
         self.emby_key = (env("EMBY_KEY", "") or "").strip()
         # How Emby sees the .strm folder (its path inside the Emby container), e.g. /vod.
         self.emby_path = (env("EMBY_PATH", "") or "").strip().rstrip("/")
+        # How Emby sees the mount, for libraries that play from it, e.g. /vodmount.
+        self.emby_mount_path = (env("EMBY_MOUNT_PATH", "") or "").strip().rstrip("/")
         if len(self.emby_key) >= 3 and self.emby_key not in SECRETS:
             SECRETS.append(self.emby_key)
         # posteroverlay (poster overlays and missing artwork): asked for a run after each sync that added
@@ -1947,6 +1949,21 @@ def _top_new(folder, existing):
     return folder
 
 
+def mount_changes(old, new):
+    """{folder: "Created" | "Modified" | "Deleted"} between two trees, in the form the Emby
+    notifier takes: the highest new (or gone) folder of each added (or removed) file, or
+    the file's folder when that already existed."""
+    out = {}
+    for p in new.files.keys() - old.files.keys():
+        top = _top_new(_parent(p), old.dirs)
+        out[top] = "Created" if top not in old.dirs else out.get(top, "Modified")
+    for p in old.files.keys() - new.files.keys():
+        top = _top_new(_parent(p), new.dirs)
+        out[top] = "Deleted" if top not in new.dirs else out.get(top, "Modified")
+    out.pop("/", None)
+    return {k.lstrip("/"): v for k, v in out.items()}
+
+
 def changed_folders(old, new):
     """Folders to rescan after a refresh: the folder of each added or removed file,
     or, when a whole show or movie folder is new (or gone), that folder."""
@@ -2063,10 +2080,16 @@ class EmbyNotifier:
     def __init__(self, cfg, strm_root):
         self.cfg = cfg
         self.root = strm_root
-        self.base = cfg.emby_path or strm_root.rstrip("/")
+        # The .strm folder and the mount, as Emby sees them; changes are reported for the
+        # libraries under whichever one they use.
+        self.base = (cfg.emby_path or (strm_root or "").rstrip("/")) if strm_root else ""
         self.s = requests.Session()
         self.s.headers.update({"X-Emby-Token": cfg.emby_key, "Accept": "application/json"})
         self.lock = threading.Lock()
+
+    @property
+    def mount_base(self):
+        return getattr(self.cfg, "emby_mount_path", "")
 
     def _url(self, endpoint):
         u = self.cfg.emby_url
@@ -2089,12 +2112,14 @@ class EmbyNotifier:
             libs = self.locations()
         except Exception as e:
             return False, f"Emby: can't reach {self.cfg.emby_url}: {scrub(e)}"
-        mine = {n: [l for l in locs if l == self.base or l.startswith(self.base + "/")]
+        bases = [b for b in (self.base, self.mount_base) if b]
+        mine = {n: [l for l in locs if any(l == b or l.startswith(b + "/") for b in bases)]
                 for n, locs in libs.items()}
         mine = {n: ls for n, ls in mine.items() if ls}
         if not mine:
-            return True, (f"Emby: connected, but no library uses a folder under {self.base}. "
-                          "Check EMBY_PATH (the .strm folder's path as Emby sees it).")
+            return True, (f"Emby: connected, but no library uses a folder under {' or '.join(bases)}. "
+                          "Check EMBY_PATH (the .strm folder's path as Emby sees it) and "
+                          "EMBY_MOUNT_PATH (the mount's).")
         return True, "Emby: will report changed folders in " + ", ".join(
             f"{n} ({', '.join(ls)})" for n, ls in sorted(mine.items()))
 
@@ -2116,8 +2141,9 @@ class EmbyNotifier:
             "ReplaceAllImages": "false"}, timeout=60)
         r.raise_for_status()
 
-    def notify(self, changes):
-        """changes: {relative folder: "Created" | "Modified" | "Deleted"}. Returns a summary.
+    def notify(self, changes, base=None):
+        """changes: {relative folder: "Created" | "Modified" | "Deleted"}, under `base` (the
+        .strm folder as Emby sees it, unless given). Returns a summary.
 
         A folder Emby already knows (a season, or a movie that changed) is reported as
         changed, and Emby refreshes just that folder. A folder that's new or gone isn't:
@@ -2125,11 +2151,12 @@ class EmbyNotifier:
         new movie means re-checking every movie in its category (hours, for a big one).
         For those, xtreamfs asks Emby to look only directly inside the parent folder.
         """
+        base = base or self.base
         with self.lock:
             libs = self.libraries()
             updates, parents, outside = [], {}, 0
             for rel, kind in sorted(changes.items()):
-                path = self.base + "/" + rel.strip("/")
+                path = base + "/" + rel.strip("/")
                 lib = next(((lid, locs) for _, lid, locs in libs
                             if any(path == l or path.startswith(l + "/") for l in locs)), None)
                 if not lib:
@@ -2165,7 +2192,7 @@ class EmbyNotifier:
             for parent in fallback:
                 kind = parents[parent][1]
                 for rel, k in changes.items():
-                    path = self.base + "/" + rel.strip("/")
+                    path = base + "/" + rel.strip("/")
                     if os.path.dirname(path) == parent and k == kind:
                         updates.append({"Path": path, "UpdateType": k})
             for i in range(0, len(updates), self.BATCH):
@@ -2826,8 +2853,8 @@ class XtreamFS(fuse.Operations):
                                 themes=ThemeFinder(cfg) if cfg.series_themes else None)
                      if cfg.strm_dir else None)
         self.emby = None
-        if self.strm and cfg.emby_url and cfg.emby_key:
-            self.emby = EmbyNotifier(cfg, cfg.strm_dir)
+        if (self.strm or cfg.emby_mount_path) and cfg.emby_url and cfg.emby_key:
+            self.emby = EmbyNotifier(cfg, cfg.strm_dir if self.strm else None)
             threading.Thread(target=self._emby_check, daemon=True).start()
         if self.strm:
             # Emby and posteroverlay are told about each sync's changes (posteroverlay can be set up later).
@@ -2884,6 +2911,26 @@ class XtreamFS(fuse.Operations):
         if self.emby:
             self._notify_emby(changes)
         if self.cfg.posteroverlay_url and any(v == "Created" for v in changes.values()):
+            time.sleep(self.POSTEROVERLAY_DELAY)
+            self._start_posteroverlay()
+
+    def _after_mount_change(self, old, new):
+        """Emby libraries playing from the mount get told what changed in it (a FUSE mount
+        sends no change notifications); without .strm files, posteroverlay is started from here."""
+        try:
+            changes = mount_changes(old, new)
+        except Exception as e:
+            log.warning("Emby: couldn't work out the mount's changed folders: %s", e)
+            return
+        if not changes:
+            return
+        if self.emby and self.cfg.emby_mount_path:
+            try:
+                STATUS["emby_mount"] = self.emby.notify(changes, base=self.cfg.emby_mount_path)
+            except Exception as e:
+                log.warning("Emby: couldn't report the mount's changed folders: %s", scrub(e))
+                STATUS["emby_mount"] = {"time": int(time.time()), "error": scrub(e)}
+        if not self.strm and self.cfg.posteroverlay_url and "Created" in changes.values():
             time.sleep(self.POSTEROVERLAY_DELAY)
             self._start_posteroverlay()
 
@@ -3149,7 +3196,7 @@ class XtreamFS(fuse.Operations):
            "series_themes", "tmdb_key", "theme_lookups", "theme_retry_days",
            "posteroverlay_url", "posteroverlay_server",
            "read_ahead_mb", "read_ahead_start_mb", "reconnect_tries",
-           "max_streams", "main_streams", "mount_streams", "account_order")
+           "max_streams", "main_streams", "mount_streams", "account_order", "emby_mount_path")
     # Changes to these start a .strm sync (no catalog refresh needed).
     THEME_SETTINGS = ("series_themes", "tmdb_key", "theme_lookups", "theme_retry_days")
     # Changes to these need a fresh catalog refresh to take effect.
@@ -3365,6 +3412,10 @@ class XtreamFS(fuse.Operations):
                 self.catalog, self.state = catalog, state
                 if self.plex and old_tree.files:
                     threading.Thread(target=self._notify_plex, args=(old_tree, tree),
+                                     daemon=True).start()
+                if old_tree.files and (self.emby and self.cfg.emby_mount_path or
+                                       not self.strm and self.cfg.posteroverlay_url):
+                    threading.Thread(target=self._after_mount_change, args=(old_tree, tree),
                                      daemon=True).start()
                 set_phase("saving")
                 self._save_json(self.catalog_path, catalog)

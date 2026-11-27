@@ -233,6 +233,7 @@ All settings go in `.env`. See `.env.example` for the full list with notes.
 | `EMBY_URL` | | Emby (or Jellyfin) server address, e.g. `http://<server>:8096`. With `EMBY_KEY`, xtreamfs tells Emby which `.strm` folders each sync added, changed or removed, so they appear without a full library scan |
 | `EMBY_KEY` | | An Emby API key (Dashboard → Advanced → API Keys); masked in the logs |
 | `EMBY_PATH` | `STRM_DIR` | The `.strm` folder's path as Emby sees it, e.g. `/vod` |
+| `EMBY_MOUNT_PATH` | | For Emby libraries that play from the mount: the mount's path inside the Emby container, e.g. `/vodmount`. After each refresh xtreamfs tells Emby which of those folders changed (a FUSE mount sends no change notifications) |
 | `POSTEROVERLAY_URL` | | posteroverlay's address, e.g. `http://<server>:8095`. After a sync that added titles, xtreamfs starts a posteroverlay run two minutes later, so new titles get their poster without waiting for its schedule |
 | `POSTEROVERLAY_SERVER` | | The posteroverlay server id to run (blank: all of them) |
 
