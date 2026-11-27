@@ -55,6 +55,7 @@ EDITABLE = {
     "MAX_STREAMS", "USER_AGENT", "CACHE_MB", "CACHE_EDGE_MB", "STATS_INTERVAL",
     "PREFETCH", "PREFETCH_HEAD_MB", "PREFETCH_TAIL_MB", "LOG_LEVEL",
     "READ_AHEAD_MB", "READ_AHEAD_START_MB", "RECONNECT_TRIES",
+    "MAIN_STREAMS", "MOUNT_STREAMS", "ACCOUNT_ORDER",
     "PLEX_URL", "PLEX_TOKEN", "PLEX_PATH", "PLEX_SCAN_MAX",
     "EMBY_URL", "EMBY_KEY", "EMBY_PATH", "POSTEROVERLAY_URL", "POSTEROVERLAY_SERVER",
 }
@@ -211,6 +212,11 @@ class Config:
         self.theme_retry_days = max(1.0, float(env("THEME_RETRY_DAYS", "30")))
         self.shrink_guard_min = int(env("SHRINK_GUARD_MIN", "50"))  # ignore tiny libraries
         self.max_streams = max(1, int(env("MAX_STREAMS", "1")))
+        # With a second account (MOUNT_USER): how many connections xtreamfs may use on each
+        # account (0 = the provider's limit for it), and which account new streams try first.
+        self.main_streams = max(0, int(float(env("MAIN_STREAMS", "0") or 0)))
+        self.mount_streams = max(0, int(float(env("MOUNT_STREAMS", "0") or 0)))
+        self.account_order = "main" if (env("ACCOUNT_ORDER", "mount") or "").strip().lower() == "main" else "mount"
         self.user_agent = env("USER_AGENT", "VLC/3.0.20 LibVLC/3.0.20")
         self.strip_prefix = env("STRIP_PREFIX", "1") == "1"
         self.api_delay = float(env("API_DELAY", "0.3"))
@@ -1029,42 +1035,150 @@ def fetch_movie_details(cfg: Config, catalog, cache, save, workers=2):
 # --------------------------------------------------------------------------
 
 
+LIMIT_REFUSED = (429, 458, 509)  # the provider refusing because the account is at its limit
+USAGE_CHECK = 30  # seconds between checks of each account's connections in use
+ACCOUNT_FULL_FOR = 60  # after the provider says an account is full, leave it alone this long
+
+
 class ConnectionPool:
-    """Caps simultaneous provider connections across all open files."""
+    """Caps simultaneous provider connections, in total and per account, and picks the
+    account each new connection uses. Connections in use outside xtreamfs (other apps,
+    Emby playing .strm files) are counted from what the provider reports for each account,
+    so xtreamfs leaves them room."""
 
-    def __init__(self, limit):
-        self.limit = limit
+    def __init__(self, limit, cfg=None):
+        self._limit = limit
+        self.cfg = cfg
         self.cond = threading.Condition()
-        self.active = OrderedDict()  # stream -> True (LRU order)
+        self.active = OrderedDict()  # stream -> account, least recently used first
+        self.provider_max = {}  # account -> the provider's connection limit
+        self.outside = {}  # account -> connections in use outside xtreamfs
+        self.full_until = {}  # account -> until when it's left alone
 
-    def acquire(self, stream, timeout=30):
+    @property
+    def limit(self):
+        return self._limit if self.cfg is None else self.cfg.max_streams
+
+    @limit.setter
+    def limit(self, value):
+        self._limit = value
+        if self.cfg is not None:
+            self.cfg.max_streams = value
+
+    def accounts(self):
+        """The accounts xtreamfs streams on, in the order new streams try them."""
+        c = self.cfg
+        if c is None or not (c.mount_user and c.mount_password) or c.mount_user == c.user:
+            return ["main"]
+        return ["main", "mount"] if c.account_order == "main" else ["mount", "main"]
+
+    def cap(self, account):
+        if self.cfg is None:
+            return self.limit
+        setting = self.cfg.main_streams if account == "main" else self.cfg.mount_streams
+        pmax = self.provider_max.get(account)
+        cap = setting or pmax or self.limit
+        return min(cap, pmax) if pmax else cap
+
+    def _ours(self, account):
+        return sum(1 for a in self.active.values() if a == account)
+
+    def _room(self, account):
+        if time.time() < self.full_until.get(account, 0):
+            return 0
+        return self.cap(account) - self._ours(account) - self.outside.get(account, 0)
+
+    def _pick(self, allowed=None, reserve=0):
+        for a in self.accounts():
+            if (allowed is None or a in allowed) and self._room(a) > reserve:
+                return a
+        return None
+
+    def _evict(self, stream, allowed=None):
+        """Close the least recently used idle connection that would make room."""
+        total_full = len(self.active) >= self.limit
+        for victim in list(self.active):
+            a = self.active[victim]
+            if victim is stream or victim.busy or (allowed is not None and a not in allowed):
+                continue
+            if total_full or self._room(a) + 1 > 0:
+                victim._close_locked_by_pool()
+                self.active.pop(victim, None)
+                return True
+        return False
+
+    def acquire(self, stream, timeout=30, allowed=None):
         with self.cond:
+            self.active.pop(stream, None)
             deadline = time.time() + timeout
-            while len(self.active) >= self.limit:
-                # Evict the least-recently-used idle connection, if any.
-                for victim in list(self.active):
-                    if victim is not stream and not victim.busy:
-                        victim._close_locked_by_pool()
-                        self.active.pop(victim, None)
-                        break
-                else:
-                    left = deadline - time.time()
-                    if left <= 0:
-                        return False
-                    self.cond.wait(left)
+            while True:
+                if len(self.active) < self.limit:
+                    a = self._pick(allowed)
+                    if a:
+                        self.active[stream] = a
+                        return True
+                if self._evict(stream, allowed):
                     continue
-            self.active[stream] = True
-            self.active.move_to_end(stream)
-            return True
+                left = deadline - time.time()
+                if left <= 0:
+                    return False
+                self.cond.wait(min(left, 5))
 
     def try_acquire(self, stream, reserve=1):
         """Take a connection only if one is free, keeping `reserve` free for
         real reads. Never closes anyone else's connection."""
         with self.cond:
             if len(self.active) < self.limit - reserve:
-                self.active[stream] = True
-                return True
+                a = self._pick(reserve=reserve)
+                if a:
+                    self.active[stream] = a
+                    return True
             return False
+
+    def move(self, stream, account, timeout=10):
+        """Put a stream's connection on another account (when the provider refused the
+        first one). False when that account has no room in time."""
+        with self.cond:
+            if self.active.get(stream) == account:
+                return True
+            deadline = time.time() + timeout
+            while True:
+                if account in self.accounts() and self._room(account) > 0:
+                    self.active[stream] = account
+                    self.cond.notify_all()
+                    return True
+                if self._evict(stream, {account}):
+                    continue
+                left = deadline - time.time()
+                if left <= 0:
+                    return False
+                self.cond.wait(min(left, 5))
+
+    def account_of(self, stream):
+        with self.cond:
+            return self.active.get(stream) or self.accounts()[0]
+
+    def mark_full(self, account):
+        with self.cond:
+            self.full_until[account] = time.time() + ACCOUNT_FULL_FOR
+
+    def set_usage(self, account, in_use, provider_max):
+        """What the provider says is in use on an account; what isn't ours is someone else's."""
+        with self.cond:
+            if provider_max:
+                self.provider_max[account] = provider_max
+            if in_use is not None:
+                self.outside[account] = max(0, in_use - self._ours(account))
+            self.cond.notify_all()
+
+    def view(self):
+        with self.cond:
+            return {"limit": self.limit, "in_use": len(self.active),
+                    "accounts": [{"account": a, "cap": self.cap(a), "ours": self._ours(a),
+                                  "outside": self.outside.get(a, 0),
+                                  "provider_max": self.provider_max.get(a),
+                                  "full": time.time() < self.full_until.get(a, 0)}
+                                 for a in self.accounts()]}
 
     def touch(self, stream):
         with self.cond:
@@ -1304,7 +1418,7 @@ class Stream:
 
     def _connect(self, pos):
         """A new provider connection from `pos` on (this stream's pool slot is kept)."""
-        r = self.fs.fetch(self.entry, f"bytes={pos}-", STREAM_TIMEOUT)
+        r = self.fs.fetch(self.entry, f"bytes={pos}-", STREAM_TIMEOUT, self)
         if r.status_code != 206:
             r.close()
             raise OSError(EIO, f"HTTP {r.status_code} on reconnect")
@@ -1335,7 +1449,7 @@ class Stream:
         if self.fs.cache.enabled() and self.fs.cache.in_edge(offset, 1, self.size):
             start = offset - offset % BLOCK
         try:
-            r = self.fs.fetch(self.entry, f"bytes={start}-", STREAM_TIMEOUT)
+            r = self.fs.fetch(self.entry, f"bytes={start}-", STREAM_TIMEOUT, self)
         except Exception:
             self.fs.pool.release(self)
             raise
@@ -1745,16 +1859,16 @@ class Prefetcher:
                 time.sleep(0.25)
             else:
                 try:
-                    self._fetch(e)
+                    self._fetch(e, slot)
                 except Exception as ex:
                     log.debug("Pre-fetch %s: %s", e.key, ex)
                 finally:
                     fs.pool.release(slot)
 
-    def _fetch(self, e):
+    def _fetch(self, e, slot=None):
         fs, cache = self.fs, self.fs.cache
         known = fs.sizes.get(e.key, 0)
-        r = fs.fetch(e, f"bytes=0-{self.head - 1}", (15, 30))
+        r = fs.fetch(e, f"bytes=0-{self.head - 1}", (15, 30), slot)
         try:
             if r.status_code != 206:
                 return  # unavailable, or no range support: leave it to the normal path
@@ -1777,7 +1891,7 @@ class Prefetcher:
         if self.tail and size > self.head:
             start = max(self.head, size - self.tail)
             start -= start % BLOCK
-            r = fs.fetch(e, f"bytes={start}-", (15, 30))
+            r = fs.fetch(e, f"bytes={start}-", (15, 30), slot)
             try:
                 if r.status_code == 206:
                     data = read_n(r, size - start)
@@ -2631,10 +2745,10 @@ class XtreamFS(fuse.Operations):
         self.xt = Xtream(cfg)
         self.http = requests.Session()
         self.http.headers["User-Agent"] = cfg.user_agent
-        self.pool = ConnectionPool(cfg.max_streams)
+        self.pool = ConnectionPool(cfg.max_streams, cfg)
         self.stats = Stats()
         self.cache = EdgeCache(cfg.cache_mb * 2**20, cfg.cache_edge_mb * 2**20)
-        self.resolved = {}  # entry key -> (final URL after redirects, time resolved)
+        self.resolved = {}  # (entry key, account) -> (final URL after redirects, time resolved)
         # Titles the mount's second account is refused for (its package may leave some categories
         # out): entry key -> time. These stream on the main account instead, for a day.
         self.main_only = {}
@@ -2701,6 +2815,7 @@ class XtreamFS(fuse.Operations):
         threading.Thread(target=self._refresh_loop, daemon=True).start()
         threading.Thread(target=self._save_sizes_loop, daemon=True).start()
         threading.Thread(target=self._stats_loop, daemon=True).start()
+        threading.Thread(target=self._usage_loop, daemon=True).start()
         port = int(os.environ.get("WEB_PORT", "8099") or 0)
         if port:
             try:
@@ -2998,7 +3113,8 @@ class XtreamFS(fuse.Operations):
            "strm_nfo_lock", "movie_details", "movie_details_skip", "movie_artwork", "unavailable_retry", "redirect_ttl",
            "series_themes", "tmdb_key", "theme_lookups", "theme_retry_days",
            "posteroverlay_url", "posteroverlay_server",
-           "read_ahead_mb", "read_ahead_start_mb", "reconnect_tries")
+           "read_ahead_mb", "read_ahead_start_mb", "reconnect_tries",
+           "max_streams", "main_streams", "mount_streams", "account_order")
     # Changes to these start a .strm sync (no catalog refresh needed).
     THEME_SETTINGS = ("series_themes", "tmdb_key", "theme_lookups", "theme_retry_days")
     # Changes to these need a fresh catalog refresh to take effect.
@@ -3284,28 +3400,60 @@ class XtreamFS(fuse.Operations):
         size, _ = self._probe_size(entry)
         return size
 
-    def stream_url(self, entry):
-        """The provider URL the mount streams from: the entry's own, or the same title on the
-        mount account when MOUNT_USER / MOUNT_PASS are set."""
+    def stream_url(self, entry, account="mount"):
+        """The provider URL for a title on one of the accounts: the entry's own (the main
+        account), or the same title on the mount account when MOUNT_USER / MOUNT_PASS are set."""
         c = self.cfg
-        if not (c.mount_user and c.mount_password):
+        if account == "main" or not (c.mount_user and c.mount_password):
             return entry.url
         old = f"/{c.user}/{c.password}/"
         if old not in entry.url:
             return entry.url
         return entry.url.replace(old, f"/{c.mount_user}/{c.mount_password}/", 1)
 
-    def fetch(self, entry, byte_range, timeout):
-        """GET a byte range of a title from the provider.
+    def fetch(self, entry, byte_range, timeout, stream=None):
+        """GET a byte range of a title from the provider, on the account the stream's
+        connection is on (the pool picks it).
 
-        Xtream servers usually answer with a redirect to a tokenised URL on a
-        streaming host. Plex opens each file several times while scanning it,
-        so the final URL is remembered for a while and later requests go there
-        directly, skipping the redirect. If the remembered URL stops working
-        (tokens expire), it falls back to the original URL.
+        Titles the mount account is refused for go to the main account, and when the
+        provider says an account is at its limit, the other account is tried.
         """
+        pool = self.pool
+        acct = pool.account_of(stream) if stream is not None else pool.accounts()[0]
+        if acct == "mount" and time.time() - self.main_only.get(entry.key, 0) < 86400:
+            if stream is None or pool.move(stream, "main"):
+                acct = "main"
+        r = self._get(entry, byte_range, timeout, acct)
+        if r.status_code in UNAVAILABLE and acct == "mount":
+            # The second account is refused this title (its package may leave some out).
+            if entry.key not in self.main_only:
+                log.debug("%s: refused for the mount account (HTTP %s); using the main account",
+                          entry.key, r.status_code)
+            self.main_only[entry.key] = time.time()
+            with self.stats.lock:
+                self.stats.fallbacks.add(entry.key)
+            if stream is None or pool.move(stream, "main"):
+                r.close()
+                r = self._get(entry, byte_range, timeout, "main")
+        elif r.status_code in LIMIT_REFUSED:
+            pool.mark_full(acct)
+            other = next((a for a in pool.accounts() if a != acct), None)
+            log.info("Provider says the %s account is at its connection limit (HTTP %s)%s",
+                     acct, r.status_code, f"; trying the {other} account" if other else "")
+            if other and stream is not None and pool.move(stream, other):
+                r.close()
+                r = self._get(entry, byte_range, timeout, other)
+        return r
+
+    def _get(self, entry, byte_range, timeout, acct):
+        """One ranged GET on one account. Xtream servers usually answer with a redirect to
+        a tokenised URL on a streaming host; Plex opens each file several times while
+        scanning it, so the final URL is remembered for a while (per account) and later
+        requests go there directly. If it stops working (tokens expire), the original
+        URL is used again."""
         headers = {"Range": byte_range}
-        cached = self.resolved.get(entry.key)
+        rkey = (entry.key, acct)
+        cached = self.resolved.get(rkey)
         if cached and time.time() - cached[1] < self.cfg.redirect_ttl:
             t0 = time.time()
             try:
@@ -3317,32 +3465,33 @@ class XtreamFS(fuse.Operations):
                 r.close()
             except requests.RequestException:
                 pass
-            self.resolved.pop(entry.key, None)
-        url = self.stream_url(entry)
-        if url != entry.url and time.time() - self.main_only.get(entry.key, 0) < 86400:
-            url = entry.url
+            self.resolved.pop(rkey, None)
         t0 = time.time()
         try:
-            r = self.http.get(url, stream=True, timeout=timeout, headers=headers)
-            if r.status_code in UNAVAILABLE and url != entry.url:
-                # The second account is refused this title: use the main account for it.
-                r.close()
-                if entry.key not in self.main_only:
-                    log.debug("%s: refused for the mount account (HTTP %s); using the main account",
-                              entry.key, r.status_code)
-                self.main_only[entry.key] = time.time()
-                with self.stats.lock:
-                    self.stats.fallbacks.add(entry.key)
-                t0 = time.time()
-                r = self.http.get(entry.url, stream=True, timeout=timeout, headers=headers)
+            r = self.http.get(self.stream_url(entry, acct), stream=True, timeout=timeout, headers=headers)
         except requests.RequestException as e:
             self.stats.error(entry.key, type(e).__name__)
             raise
-        ok = r.status_code in (200, 206)
-        if ok and r.history:
-            self.resolved[entry.key] = (r.url, time.time())
+        if r.status_code in (200, 206) and r.history:
+            self.resolved[rkey] = (r.url, time.time())
         self.stats.request(entry.key, time.time() - t0, bool(r.history), False, r.status_code)
         return r
+
+    def _usage_loop(self):
+        """Keep the pool told how many connections each account has in use, so connections
+        used outside xtreamfs (other apps, Emby's .strm playback) are left room."""
+        while True:
+            try:
+                if self.cfg.has_login():
+                    a = self.account(fresh=True)
+                    if a.get("ok"):
+                        self.pool.set_usage("main", a.get("active_connections"), a.get("max_connections"))
+                    m = self.mount_account(fresh=True) if "mount" in self.pool.accounts() else None
+                    if m and m.get("ok"):
+                        self.pool.set_usage("mount", m.get("active_connections"), m.get("max_connections"))
+            except Exception as e:
+                log.debug("Connection check failed: %s", scrub(e))
+            time.sleep(USAGE_CHECK)
 
     def _stats_loop(self):
         interval = self.cfg.stats_interval
@@ -3367,7 +3516,7 @@ class XtreamFS(fuse.Operations):
         if not self.pool.acquire(probe):
             return 0, None
         try:
-            r = self.fetch(entry, "bytes=0-0", (15, 30))
+            r = self.fetch(entry, "bytes=0-0", (15, 30), probe)
             try:
                 cr = r.headers.get("Content-Range", "")
                 m = re.search(r"/(\d+)$", cr)
@@ -3515,16 +3664,17 @@ def main():
         while True:
             time.sleep(3600)
     os.makedirs(cfg.mount, exist_ok=True)
-    log.info("Mounting at %s (max %d provider connections)",
-             cfg.mount, cfg.max_streams)
+    log.info("Mounting at %s (max %d provider connections%s)", cfg.mount, cfg.max_streams,
+             ", main account first" if cfg.account_order == "main" and cfg.mount_user else "")
     if cfg.mount_user or cfg.mount_password:
         if not (cfg.mount_user and cfg.mount_password):
             log.warning("MOUNT_USER and MOUNT_PASS both need setting; streaming with the main account")
         elif cfg.mount_user == cfg.user:
             log.info("MOUNT_USER is the main account; nothing changes")
         else:
-            log.info("Streaming through the mount with the second provider account (MOUNT_USER); "
-                     ".strm files keep the main account")
+            log.info("Streaming through the mount on both provider accounts, %s first; "
+                     ".strm files keep the main account",
+                     "the main account" if cfg.account_order == "main" else "the second account (MOUNT_USER)")
     fuse.FUSE(XtreamFS(cfg), cfg.mount, foreground=True, nothreads=False,
               allow_other=True, ro=True, attr_timeout=300, entry_timeout=300)
 

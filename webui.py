@@ -69,7 +69,16 @@ FIELDS = [
     ("THEME_RETRY_DAYS", "Emby / Jellyfin", "Look again for missing themes after (days)",
      "number", "30", "Shows with no theme, or no TVDB id, are checked again after this long."),
     ("MAX_STREAMS", "Streaming", "Max provider connections", "number", "1",
-     "Your plan's connection limit, minus any you need for live TV."),
+     "In total, across both accounts when a second one is set. Connections used outside "
+     "xtreamfs (other apps, Emby playing .strm files) are counted from what the provider "
+     "reports and left room."),
+    ("ACCOUNT_ORDER", "Streaming", "Use which account first", "choice:main,mount", "mount",
+     "With a second account set: the one new streams try first (mount = the second account). "
+     "When it's full, the other is used."),
+    ("MAIN_STREAMS", "Streaming", "Connections on the main account", "number", "0",
+     "The most xtreamfs uses on the main account. 0 = the provider's limit for it."),
+    ("MOUNT_STREAMS", "Streaming", "Connections on the second account", "number", "0",
+     "The most xtreamfs uses on the second account. 0 = the provider's limit for it."),
     ("USER_AGENT", "Streaming", "User agent", "text", "VLC/3.0.20 LibVLC/3.0.20",
      "Some providers only accept known players."),
     ("REDIRECT_CACHE_MINUTES", "Streaming", "Reuse stream links for (minutes)", "number",
@@ -120,12 +129,13 @@ FIELDS = [
      "Which posteroverlay server to run (its id, from posteroverlay's Servers page). Blank means all of them."),
     ("LOG_LEVEL", "Streaming", "Log level", "choice:DEBUG,INFO,WARNING,ERROR", "INFO", ""),
 ]
-RESTART = {"MAX_STREAMS", "USER_AGENT", "CACHE_MB", "CACHE_EDGE_MB", "STATS_INTERVAL",
+RESTART = {"USER_AGENT", "CACHE_MB", "CACHE_EDGE_MB", "STATS_INTERVAL",
            "PREFETCH", "PREFETCH_HEAD_MB", "PREFETCH_TAIL_MB",
            "PLEX_URL", "PLEX_TOKEN", "PLEX_PATH", "PLEX_SCAN_MAX", "EMBY_URL", "EMBY_KEY", "EMBY_PATH"}
 # Settings that only affect streaming through the Plex mount.
 MOUNT_ONLY = {"MAX_STREAMS", "REDIRECT_CACHE_MINUTES", "CACHE_MB", "CACHE_EDGE_MB",
               "READ_AHEAD_MB", "READ_AHEAD_START_MB", "RECONNECT_TRIES",
+              "ACCOUNT_ORDER", "MAIN_STREAMS", "MOUNT_STREAMS",
               "STATS_INTERVAL", "PREFETCH", "PREFETCH_HEAD_MB", "PREFETCH_TAIL_MB",
               "PLEX_URL", "PLEX_TOKEN", "PLEX_PATH", "PLEX_SCAN_MAX"}
 CATEGORY_KEYS = {"MOVIE_CATEGORIES", "SERIES_CATEGORIES", "MOVIE_EXCLUDE", "SERIES_EXCLUDE",
@@ -224,6 +234,7 @@ def start(fs, port, password=""):
                         "unavailable": len(fs.unavailable),
                         "strm_dir": fs.cfg.strm_dir,
                         "max_streams": fs.cfg.max_streams,
+                        "pool": fs.pool.view(),
                         "mount": fs.cfg.mount_enabled,
                         "overrides_from_page": sorted(xf.SETTINGS)})
                 if u.path == "/api/log":

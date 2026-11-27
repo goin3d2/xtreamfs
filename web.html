@@ -304,7 +304,7 @@ async function loadStatus(){
   let al="";
   if(s.shrink)al+=`<div class="alert bad"><b>Refresh held back.</b> ${esc(s.shrink)}. If the provider really removed these, <button class="btn danger" onclick="acceptShrink()">Accept the smaller catalog</button></div>`;
   if(s.last&&s.last.result==="waiting")al+=`<div class="alert"><b>Not set up yet.</b> ${esc(s.last.detail)} <button class="btn" onclick="goTab('${/login/.test(s.last.detail)?"account":"categories"}')">Open ${/login/.test(s.last.detail)?"Account":"Categories"}</button></div>`;
-  maxStreams=d.max_streams;mountOn=d.mount;
+  maxStreams=d.max_streams;mountOn=d.mount;poolView=d.pool||null;
   if(s.last&&s.last.result==="failed")al+=`<div class="alert bad"><b>Last refresh failed</b> ${ago(s.last.time,now)}: ${esc(s.last.detail)}</div>`;
   $("#alerts").innerHTML=al;
   // cards
@@ -434,7 +434,7 @@ $("#setsave").onclick=async()=>{
 async function resetField(name){try{await post("/api/settings",{[name]:null});toast("Back to the .env value.");loadSettings()}catch(e){toast(e.message)}}
 
 /* account */
-let maxStreams=null,mountOn=true,acct=null,mountAcct=false;
+let maxStreams=null,mountOn=true,acct=null,mountAcct=false,poolView=null;
 function goTab(t){document.querySelector(`nav button[data-tab=${t}]`).click()}
 function day(t){return t?new Date(t*1000).toLocaleDateString([], {year:"numeric",month:"short",day:"numeric"}):"–"}
 async function loadAccount(fresh){
@@ -458,6 +458,12 @@ async function loadAccount(fresh){
       $("#mstate").textContent=!m?"":m.ok?`In use for the mount: ${m.status||"Active"}${m.max_connections?`, ${fmtN(m.active_connections??0)} of ${fmtN(m.max_connections)} connections in use`:""}${m.expires?`, expires ${day(m.expires)}`:""}.`:`Set, but not working: ${m.error}`}catch(e){$("#mstate").textContent=e.message}}
   }catch(e){$("#acctstate").textContent="Unavailable";$("#acctdetail").textContent=e.message}
 }
+function poolNote(a){
+  const p=poolView,names={main:"main account",mount:"second account"};
+  if(!p||!p.accounts)return "Max provider connections, on Settings";
+  const parts=p.accounts.map(x=>`${names[x.account]}: up to ${fmtN(x.cap)}, ${fmtN(x.ours)} in use by xtreamfs${x.outside?`, ${fmtN(x.outside)} by other apps`:""}${x.full?" (provider says full)":""}`);
+  return (p.accounts.length>1?`${names[p.accounts[0].account]} first. `:"")+parts.join("; ");
+}
 function renderAccount(a){
   if(!a.ok){$("#acctstate").textContent="Not connected";$("#acctdetail").textContent=a.error||"";$("#acctgrid").innerHTML="";return}
   const now=Date.now()/1000,days=a.expires?Math.floor((a.expires-now)/86400):null;
@@ -467,7 +473,7 @@ function renderAccount(a){
     ["Expires",a.expires?day(a.expires):"Never",days==null?"no end date":(days<0?"expired":`${days} day${days===1?"":"s"} left`)],
     ["Connections",a.max_connections==null?"–":`${fmtN(a.active_connections??0)} of ${fmtN(a.max_connections)}`,"in use now, across all your devices"],
     mountOn===false?["Plex mount","Off","Emby plays from the provider directly, so all connections are yours to use"]:
-    ["xtreamfs uses up to",maxStreams==null?"–":fmtN(maxStreams),mountAcct?"on the second account (below), so this account's connections are all left for Emby and others":a.max_connections&&maxStreams?(maxStreams>=a.max_connections?"your whole plan: none left for other devices":`leaving ${a.max_connections-maxStreams} for Emby, live TV and others`):"Max provider connections, on Settings"],
+    ["xtreamfs uses up to",maxStreams==null?"–":fmtN(maxStreams),poolNote(a)],
   ];
   $("#acctgrid").innerHTML=cards.map(([h,b,m])=>`<div class="card"><h2>${h}</h2><div class="big">${esc(b)}</div><div class="muted" style="font-size:12px">${esc(m)}</div></div>`).join("");
 }
