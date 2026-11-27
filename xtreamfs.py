@@ -1087,10 +1087,13 @@ class ConnectionPool:
     def _ours(self, account):
         return sum(1 for a in self.active.values() if a == account)
 
-    def _room(self, account):
+    def _room(self, account, hard=False):
+        """Free connections on an account: under xtreamfs's cap for it, or with `hard`, under
+        the provider's own limit (for titles only that account may play)."""
         if time.time() < self.full_until.get(account, 0):
             return 0
-        return self.cap(account) - self._ours(account) - self.outside.get(account, 0)
+        cap = (self.provider_max.get(account) or self.cap(account)) if hard else self.cap(account)
+        return cap - self._ours(account) - self.outside.get(account, 0)
 
     def _pick(self, allowed=None, reserve=0):
         for a in self.accounts():
@@ -1140,15 +1143,16 @@ class ConnectionPool:
                     return True
             return False
 
-    def move(self, stream, account, timeout=10):
+    def move(self, stream, account, timeout=10, hard=False):
         """Put a stream's connection on another account (when the provider refused the
-        first one). False when that account has no room in time."""
+        first one). With `hard`, the account's own limit applies rather than xtreamfs's cap
+        for it (the title can only play there). False when there's no room in time."""
         with self.cond:
             if self.active.get(stream) == account:
                 return True
             deadline = time.time() + timeout
             while True:
-                if account in self.accounts() and self._room(account) > 0:
+                if account in self.accounts() and self._room(account, hard) > 0:
                     self.active[stream] = account
                     self.cond.notify_all()
                     return True
@@ -1329,6 +1333,14 @@ BLOCK = 128 * 1024
 UNAVAILABLE = (403, 404, 410)  # the provider refuses this particular title
 
 
+class Refused(Exception):
+    """The provider refused a title (one of UNAVAILABLE): reconnecting won't help."""
+
+    def __init__(self, status):
+        super().__init__(f"HTTP {status}")
+        self.status = status
+
+
 class EdgeCache:
     """Keeps the first and last few MB of recently read files in memory.
 
@@ -1457,7 +1469,8 @@ class Stream:
         r = self.fs.fetch(self.entry, f"bytes={pos}-", STREAM_TIMEOUT, self)
         if r.status_code != 206:
             r.close()
-            raise OSError(EIO, f"HTTP {r.status_code} on reconnect")
+            raise Refused(r.status_code) if r.status_code in UNAVAILABLE else \
+                OSError(EIO, f"HTTP {r.status_code} on reconnect")
         return r
 
     def _stop_read_ahead(self):
@@ -1598,6 +1611,8 @@ class Stream:
                 tries += 1
                 try:
                     r = self._connect(at)
+                except Refused as e:
+                    raise OSError(EIO, f"HTTP {e.status} on reconnect")  # no point trying again
                 except Exception as e:
                     log.debug("Reconnect %d for %s at %d failed: %s", tries, self.entry.key, at, e)
                     continue
@@ -1748,6 +1763,9 @@ class ReadAhead:
                         return
                     try:
                         r = s._connect(pos)
+                    except Refused as e:
+                        self.failed = f"HTTP {e.status}"
+                        return
                     except Exception as e:
                         log.debug("Reconnect %d for %s at %d failed: %s", tries, s.entry.key, pos, e)
                         continue
@@ -3507,7 +3525,7 @@ class XtreamFS(fuse.Operations):
         pool = self.pool
         acct = pool.account_of(stream) if stream is not None else pool.accounts()[0]
         if acct == "mount" and time.time() - self.main_only.get(entry.key, 0) < 86400:
-            if stream is None or pool.move(stream, "main"):
+            if stream is None or pool.move(stream, "main", hard=True):
                 acct = "main"
         r = self._get(entry, byte_range, timeout, acct)
         if r.status_code in UNAVAILABLE and acct == "mount":
@@ -3518,7 +3536,7 @@ class XtreamFS(fuse.Operations):
             self.main_only[entry.key] = time.time()
             with self.stats.lock:
                 self.stats.fallbacks.add(entry.key)
-            if stream is None or pool.move(stream, "main"):
+            if stream is None or pool.move(stream, "main", hard=True):
                 r.close()
                 r = self._get(entry, byte_range, timeout, "main")
         elif r.status_code in LIMIT_REFUSED:
