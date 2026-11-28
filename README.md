@@ -163,10 +163,11 @@ of stream requests. To keep the load down:
   other is used. `MAX_STREAMS` is the total across both; `MAIN_STREAMS` and
   `MOUNT_STREAMS` cap each account (0 = the provider's limit for it). The catalog
   and the `.strm` files keep the main account, and switching the mount's account
-  never rewrites a `.strm` file. If the provider refuses the second account a
-  title (its package may leave some categories out, adult content often), that
-  title streams on the main account instead; the log's provider line counts
-  these.
+  never rewrites a `.strm` file. When one account refuses a title (or says
+  it's at its limit), the other is tried; if that one serves it, the first was
+  most likely at its connection limit (providers use the same codes), so it's
+  left alone for 30 seconds and the title stays on the other account for ten
+  minutes. The log's provider line counts refusals per account.
 - **File sizes are looked up once** with a 1-byte request and cached in
   `config/sizes.json`, so restarts and rescans don't repeat it. If the provider
   later replaces a file with a smaller one, the first read past its new end

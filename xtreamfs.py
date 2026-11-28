@@ -1040,7 +1040,9 @@ def fetch_movie_details(cfg: Config, catalog, cache, save, workers=2):
 LIMIT_REFUSED = (429, 458, 509)  # the provider refusing because the account is at its limit
 USAGE_CHECK = 30  # seconds between checks of each account's connections in use
 ACCOUNT_FULL_FOR = 60  # after the provider says an account is full, leave it alone this long
-IDLE_CLOSE = 15  # seconds without reads before an open file's provider connection is closed
+IDLE_CLOSE = 60  # seconds without reads before an open file's provider connection is closed
+REFUSED_FULL_FOR = 30  # an account that refused what the other one served is left alone this long
+MOVED_FOR = 600  # ...and that title keeps using the other account this long
 
 
 class ConnectionPool:
@@ -1167,9 +1169,9 @@ class ConnectionPool:
         with self.cond:
             return self.active.get(stream) or self.accounts()[0]
 
-    def mark_full(self, account):
+    def mark_full(self, account, seconds=ACCOUNT_FULL_FOR):
         with self.cond:
-            self.full_until[account] = time.time() + ACCOUNT_FULL_FOR
+            self.full_until[account] = max(self.full_until.get(account, 0), time.time() + seconds)
 
     def set_usage(self, account, in_use, provider_max):
         """What the provider says is in use on an account; what isn't ours is someone else's.
@@ -1254,13 +1256,14 @@ class Stats:
         self.mem_reads = 0
         self.reconnects = 0
         self.unavailable = 0
-        self.fallbacks = set()
+        self.fallbacks = set()  # titles moved to the other account after a refusal
+        self.refused_by = collections.Counter()  # account -> refused requests
         self.error_kinds = collections.Counter()
         self.bytes = 0
         self.ttfb = []
         self.files = set()
 
-    def request(self, key, seconds, redirected, cache_hit, status):
+    def request(self, key, seconds, redirected, cache_hit, status, account=None):
         with self.lock:
             self.requests += 1
             self.files.add(key)
@@ -1269,6 +1272,8 @@ class Stats:
             self.cache_hits += cache_hit
             if status in UNAVAILABLE:
                 self.unavailable += 1
+                if account:
+                    self.refused_by[account] += 1
             elif status not in (200, 206):
                 self.errors += 1
                 self.error_kinds[f"HTTP {status}"] += 1
@@ -1320,8 +1325,13 @@ class Stats:
                 msg += " | %d files pre-fetched" % self.prefetched
             if self.resized:
                 msg += " | %d file sizes corrected" % self.resized
+            if len(self.refused_by) > 1 or self.fallbacks:
+                names = {"main": "main account", "mount": "second account"}
+                msg += " (" + ", ".join(f"{v} on the {names.get(k, k)}"
+                                        for k, v in self.refused_by.most_common()) + ")"
             if self.fallbacks:
-                msg += " | %d files on the main account (refused for the mount account)" % len(self.fallbacks)
+                msg += (" | %d files refused on one account and served by the other"
+                        % len(self.fallbacks))
             if self.error_kinds:
                 msg += " (" + ", ".join(f"{k} x{v}" for k, v in
                                        self.error_kinds.most_common(4)) + ")"
@@ -2830,7 +2840,8 @@ class XtreamFS(fuse.Operations):
         self.resolved = {}  # (entry key, account) -> (final URL after redirects, time resolved)
         # Titles the mount's second account is refused for (its package may leave some categories
         # out): entry key -> time. These stream on the main account instead, for a day.
-        self.main_only = {}
+        # (title, account) -> when that account refused it and the other served it
+        self.refused_on = {}
         self.tree = Tree()
         self.tree_lock = threading.Lock()
         self.handles = {}
@@ -3120,7 +3131,7 @@ class XtreamFS(fuse.Operations):
         self.cfg.mount_user, self.cfg.mount_password = user, password
         if changed:
             self.resolved.clear()  # remembered stream links belong to the previous account
-            self.main_only.clear()
+            self.refused_on.clear()
             self._mount_account = None
             log.info("Mount account %s from the web page; streams now use %s",
                      "set" if user else "cleared", "the second account" if user else "the main account")
@@ -3519,34 +3530,37 @@ class XtreamFS(fuse.Operations):
         """GET a byte range of a title from the provider, on the account the stream's
         connection is on (the pool picks it).
 
-        Titles the mount account is refused for go to the main account, and when the
-        provider says an account is at its limit, the other account is tried.
+        When one account refuses a title (403/404/410) or says it's at its limit, the other
+        account is tried. If that one serves it, the first was most likely at its limit (the
+        provider uses the same codes): it's left alone briefly, and the title stays on the
+        other account for a while.
         """
         pool = self.pool
         acct = pool.account_of(stream) if stream is not None else pool.accounts()[0]
-        if acct == "mount" and time.time() - self.main_only.get(entry.key, 0) < 86400:
-            if stream is None or pool.move(stream, "main", hard=True):
-                acct = "main"
+        others = [a for a in pool.accounts() if a != acct]
+        if others and time.time() - self.refused_on.get((entry.key, acct), 0) < MOVED_FOR:
+            if stream is None or pool.move(stream, others[0], timeout=2):
+                acct, others = others[0], [acct]
         r = self._get(entry, byte_range, timeout, acct)
-        if r.status_code in UNAVAILABLE and acct == "mount":
-            # The second account is refused this title (its package may leave some out).
-            if entry.key not in self.main_only:
-                log.debug("%s: refused for the mount account (HTTP %s); using the main account",
-                          entry.key, r.status_code)
-            self.main_only[entry.key] = time.time()
+        if r.status_code not in UNAVAILABLE and r.status_code not in LIMIT_REFUSED:
+            return r
+        limit = r.status_code in LIMIT_REFUSED
+        if limit:
+            pool.mark_full(acct)
+            log.info("Provider says the %s account is at its connection limit (HTTP %s)",
+                     acct, r.status_code)
+        if not others or (stream is not None and not pool.move(stream, others[0], timeout=3)):
+            return r
+        r2 = self._get(entry, byte_range, timeout, others[0])
+        if r2.status_code in (200, 206):
+            if not limit:
+                pool.mark_full(acct, REFUSED_FULL_FOR)
+            self.refused_on[(entry.key, acct)] = time.time()
             with self.stats.lock:
                 self.stats.fallbacks.add(entry.key)
-            if stream is None or pool.move(stream, "main", hard=True):
-                r.close()
-                r = self._get(entry, byte_range, timeout, "main")
-        elif r.status_code in LIMIT_REFUSED:
-            pool.mark_full(acct)
-            other = next((a for a in pool.accounts() if a != acct), None)
-            log.info("Provider says the %s account is at its connection limit (HTTP %s)%s",
-                     acct, r.status_code, f"; trying the {other} account" if other else "")
-            if other and stream is not None and pool.move(stream, other):
-                r.close()
-                r = self._get(entry, byte_range, timeout, other)
+            r.close()
+            return r2
+        r2.close()
         return r
 
     def _get(self, entry, byte_range, timeout, acct):
@@ -3578,7 +3592,7 @@ class XtreamFS(fuse.Operations):
             raise
         if r.status_code in (200, 206) and r.history:
             self.resolved[rkey] = (r.url, time.time())
-        self.stats.request(entry.key, time.time() - t0, bool(r.history), False, r.status_code)
+        self.stats.request(entry.key, time.time() - t0, bool(r.history), False, r.status_code, acct)
         return r
 
     def _usage_loop(self):
@@ -3617,9 +3631,9 @@ class XtreamFS(fuse.Operations):
             for k, (_, t) in list(self.resolved.items()):
                 if t < cutoff:
                     self.resolved.pop(k, None)
-            for k, t in list(self.main_only.items()):
-                if time.time() - t > 86400:
-                    self.main_only.pop(k, None)
+            for k, t in list(self.refused_on.items()):
+                if time.time() - t > MOVED_FOR:
+                    self.refused_on.pop(k, None)
 
     def _probe_size(self, entry):
         """Find the file size with a 1-byte range request (HEAD is often unsupported).
